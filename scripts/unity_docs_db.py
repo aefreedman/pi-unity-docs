@@ -725,43 +725,83 @@ def search_db(db_path: Path, query: str, limit: int, corpus: str | None = None) 
 def symbol_db(db_path: Path, name: str, limit: int) -> list[dict[str, Any]]:
     conn = ensure_db(db_path)
     clean = normalize_space(name)
-    like = f"%{clean}%"
     short = clean.split(".")[-1]
-    rows = [
-        row_dict(row)
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def append_symbol_rows(where_sql: str, params: tuple[Any, ...]) -> None:
+        nonlocal rows
+        if len(rows) >= limit:
+            return
+        query_limit = max(limit * 3, 12)
         for row in conn.execute(
-            """
+            f"""
             SELECT sym.full_name AS fullName, sym.short_name AS shortName, sym.uid, sym.kind, sym.signature,
                    p.id AS pageId, p.title, p.corpus, p.slug, p.summary
             FROM symbols sym
             JOIN pages p ON p.id = sym.page_id
-            WHERE sym.full_name = ? OR sym.short_name = ? OR p.title = ?
-               OR sym.full_name LIKE ? OR sym.short_name = ?
-            ORDER BY
-              CASE
-                WHEN sym.full_name = ? THEN 0
-                WHEN p.title = ? THEN 1
-                WHEN sym.short_name = ? THEN 2
-                WHEN sym.full_name LIKE ? THEN 3
-                ELSE 4
-              END,
-              length(sym.full_name)
+            WHERE {where_sql}
+            ORDER BY length(sym.full_name)
             LIMIT ?
             """,
-            (clean, clean, clean, like, short, clean, clean, clean, like, limit),
-        )
-    ]
-    # Deduplicate repeated xref aliases pointing to the same page/signature.
-    deduped: list[dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
-    for row in rows:
-        key = (row["pageId"], row.get("signature") or row.get("fullName") or "")
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(row)
+            (*params, query_limit),
+        ):
+            item = row_dict(row)
+            key = (item["pageId"], item.get("signature") or item.get("fullName") or "")
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(item)
+            if len(rows) >= limit:
+                return
+
+    def append_page_rows(title: str) -> None:
+        if len(rows) >= limit:
+            return
+        for row in conn.execute(
+            "SELECT id AS pageId, title, corpus, slug, kind, uid, summary FROM pages WHERE title = ? LIMIT ?",
+            (title, limit),
+        ):
+            page = row_dict(row)
+            key = (page["pageId"], page.get("uid") or page.get("title") or "")
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append({
+                "fullName": page.get("uid") or page.get("title"),
+                "shortName": page.get("title"),
+                "uid": page.get("uid"),
+                "kind": page.get("kind"),
+                "signature": "",
+                **page,
+            })
+            if len(rows) >= limit:
+                return
+
+    # Keep exact/index-friendly lookups first. A single OR with LIKE forced a
+    # large scan on the 100k-row symbol table; staged queries are materially
+    # faster and keep exact API pages ahead of fuzzy matches.
+    append_symbol_rows("sym.full_name = ?", (clean,))
+    if "." in clean:
+        append_symbol_rows("sym.full_name GLOB ?", (f"{clean}(*",))
+        append_symbol_rows("sym.full_name GLOB ?", (f"{clean}",))
+        append_symbol_rows("sym.full_name GLOB ?", (f"*.{clean}(*",))
+        append_symbol_rows("sym.full_name GLOB ?", (f"*.{clean}",))
+        if rows:
+            conn.close()
+            return rows[:limit]
+    append_page_rows(clean)
+    if rows:
+        conn.close()
+        return rows[:limit]
+    append_symbol_rows("sym.short_name = ?", (clean,))
+    if short != clean:
+        append_symbol_rows("sym.short_name = ?", (short,))
+    if len(rows) < limit:
+        append_symbol_rows("sym.full_name GLOB ?", (f"*{clean}*",))
+
     conn.close()
-    return deduped
+    return rows[:limit]
 
 
 def resolve_page(conn: sqlite3.Connection, page: str) -> sqlite3.Row | None:
