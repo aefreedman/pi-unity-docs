@@ -22,6 +22,15 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Iterable
 
+# Pi's TypeScript extension reads this script's stdout/stderr as UTF-8. On
+# Windows, redirected Python stdio can default to a legacy codepage such as
+# cp1252, which turns curly quotes and ellipses into invalid UTF-8 bytes for
+# Node and shows up in the TUI as replacement characters (�).
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8")
+
 DB_FILENAME = "unity_docs.sqlite"
 CONFIG_PATH = Path.home() / ".pi" / "unity-docs" / "config.json"
 SKIP_CLASSES = {
