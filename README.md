@@ -1,0 +1,91 @@
+# pi-unity-docs
+
+Pi package for fast, token-efficient retrieval from local Unity offline documentation.
+
+The package builds a local SQLite FTS5 database from an installed Unity documentation folder such as:
+
+```text
+C:\Program Files\Unity\Hub\Editor\6000.4.7f1\Editor\Data\Documentation\en
+```
+
+It does not copy raw HTML and does not generate Markdown/JSONL. The Unity install remains the source of truth; the generated database is a rebuildable cache.
+
+## Install in pi
+
+From this checkout:
+
+```bash
+pi install <path-to-pi-unity-docs>
+```
+
+Or run pi temporarily with:
+
+```bash
+pi -e <path-to-pi-unity-docs>
+```
+
+## Configure and build
+
+Interactive configuration from pi:
+
+```text
+/unity-docs-configure
+```
+
+The command asks for:
+
+- Unity documentation source directory
+- database install directory
+- Unity version label
+- whether to build immediately
+
+Non-interactive CLI:
+
+```bash
+python scripts/unity_docs_db.py configure \
+  --source "C:/Program Files/Unity/Hub/Editor/6000.4.7f1/Editor/Data/Documentation/en" \
+  --db-dir "$LOCALAPPDATA/pi/unity-docs/6000.4.7f1" \
+  --version 6000.4.7f1 \
+  --yes
+
+python scripts/unity_docs_db.py build \
+  --source "C:/Program Files/Unity/Hub/Editor/6000.4.7f1/Editor/Data/Documentation/en" \
+  --db-dir "$LOCALAPPDATA/pi/unity-docs/6000.4.7f1" \
+  --version 6000.4.7f1 \
+  --force \
+  --progress
+```
+
+Configuration is stored at:
+
+```text
+~/.pi/unity-docs/config.json
+```
+
+The generated database is named `unity_docs.sqlite` inside the selected database directory.
+
+## Tools exposed to pi
+
+- `unity_docs_info` — show configuration and database status.
+- `unity_docs_search` — full-text search over section-level Unity docs.
+- `unity_docs_symbol` — exact/near-exact API symbol lookup.
+- `unity_docs_show` — retrieve compact page sections.
+- `unity_docs_build_database` — build/rebuild the cache when explicitly requested.
+
+## Direct CLI usage
+
+```bash
+python scripts/unity_docs_db.py info
+python scripts/unity_docs_db.py build --source "<Unity Documentation/en>" --db-dir "<db-dir>" --force --progress
+python scripts/unity_docs_db.py search "Physics.Raycast layerMask trigger" --limit 8
+python scripts/unity_docs_db.py symbol "UnityEngine.Physics.Raycast"
+python scripts/unity_docs_db.py show "ScriptReference/Physics.Raycast" --sections Declaration,Parameters,Returns,Description --max-chars 6000
+```
+
+Add `--json` to query commands for machine-readable output. Build progress is emitted to stderr with `--progress`, so JSON stdout remains parseable.
+
+## Notes
+
+- Requires Python 3.10+ and SQLite with FTS5 enabled. No third-party Python packages are required.
+- Build time depends on disk speed. ScriptReference contains tens of thousands of pages.
+- The database can be deleted at any time and rebuilt from the Unity install.

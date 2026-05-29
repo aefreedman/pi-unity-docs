@@ -1,0 +1,32 @@
+{
+  "name": "@aefree/pi-unity-docs",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Pi tools and skills for fast, token-efficient retrieval from local Unity documentation.",
+  "keywords": [
+    "pi-package",
+    "unity",
+    "documentation"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/aefreedman/pi-unity-docs.git"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  },
+  "scripts": {
+    "test": "python -m py_compile scripts/unity_docs_db.py"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  }
+}

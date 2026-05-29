@@ -1,0 +1,371 @@
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
+import os from "node:os";
+
+const packageRoot = path.dirname(fileURLToPath(import.meta.url));
+const scriptPath = path.join(packageRoot, "scripts", "unity_docs_db.py");
+const pythonCommand = process.env.PI_UNITY_DOCS_PYTHON || "python";
+
+type ScriptResult = {
+  stdout: string;
+  stderr: string;
+  exitCode: number | null;
+  json?: unknown;
+};
+
+function formatProgressLine(line: string): string | null {
+  if (!line.startsWith("PROGRESS ")) return null;
+  try {
+    const payload = JSON.parse(line.slice("PROGRESS ".length)) as {
+      stage?: string;
+      corpus?: string | null;
+      pages?: number;
+      totalPages?: number;
+      percent?: number;
+      sections?: number;
+      symbols?: number;
+      elapsed?: string;
+    };
+    const total = payload.totalPages ?? 0;
+    const pages = payload.pages ?? 0;
+    const percent = typeof payload.percent === "number" ? `${payload.percent.toFixed(1)}%` : "?%";
+    const progress = total > 0 ? `${pages}/${total} pages (${percent})` : `${pages} pages`;
+    const corpus = payload.corpus ? ` ${payload.corpus}` : "";
+    return `Unity docs build:${corpus} ${payload.stage ?? "running"} — ${progress}, ${payload.sections ?? 0} sections, ${payload.symbols ?? 0} symbols, elapsed ${payload.elapsed ?? "?"}`;
+  } catch {
+    return line.slice("PROGRESS ".length).trim() || null;
+  }
+}
+
+function runScript(args: string[], timeoutMs = 120_000, onProgress?: (message: string) => void): Promise<ScriptResult> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(pythonCommand, [scriptPath, ...args], {
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    let stdout = "";
+    let stderr = "";
+    let stderrLineBuffer = "";
+    let lastProgressAt = Date.now();
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error(`Unity docs script timed out after ${Math.round(timeoutMs / 1000)}s.`));
+    }, timeoutMs);
+    const heartbeat = onProgress
+      ? setInterval(() => {
+          if (Date.now() - lastProgressAt >= 15_000) {
+            lastProgressAt = Date.now();
+            onProgress("Unity docs build still running...");
+          }
+        }, 15_000)
+      : undefined;
+
+    const clearTimers = () => {
+      clearTimeout(timer);
+      if (heartbeat) clearInterval(heartbeat);
+    };
+
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+      stderrLineBuffer += chunk;
+      const lines = stderrLineBuffer.split(/\r?\n/);
+      stderrLineBuffer = lines.pop() ?? "";
+      for (const line of lines) {
+        const message = formatProgressLine(line.trim());
+        if (message && onProgress) {
+          lastProgressAt = Date.now();
+          onProgress(message);
+        }
+      }
+    });
+    child.on("error", (error) => {
+      clearTimers();
+      reject(error);
+    });
+    child.on("close", (exitCode) => {
+      clearTimers();
+      const finalProgress = formatProgressLine(stderrLineBuffer.trim());
+      if (finalProgress && onProgress) onProgress(finalProgress);
+      if (exitCode !== 0) {
+        reject(new Error([`Unity docs script failed with exit code ${exitCode}.`, stderr.trim(), stdout.trim()].filter(Boolean).join("\n")));
+        return;
+      }
+      let parsed: unknown | undefined;
+      if (stdout.trim()) {
+        try {
+          parsed = JSON.parse(stdout);
+        } catch {
+          // Text mode output is still useful for diagnostics.
+        }
+      }
+      resolve({ stdout, stderr, exitCode, json: parsed });
+    });
+  });
+}
+
+function asArray(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value) ? value.filter((item): item is Record<string, unknown> => typeof item === "object" && item !== null) : [];
+}
+
+function truncate(value: string, max = 500): string {
+  if (value.length <= max) return value;
+  return `${value.slice(0, max)}…`;
+}
+
+function formatSearchResults(results: Record<string, unknown>[]): string {
+  if (results.length === 0) return "No Unity documentation results found.";
+  return results.map((result, index) => {
+    const pageId = String(result.pageId ?? "");
+    const title = String(result.title ?? "");
+    const heading = String(result.headingPath ?? "");
+    const snippet = String(result.snippet ?? "").replace(/\s+/g, " ").trim();
+    return [
+      `${index + 1}. ${pageId} — ${title}`,
+      heading ? `   Section: ${heading}` : undefined,
+      snippet ? `   ${truncate(snippet, 700)}` : undefined,
+    ].filter(Boolean).join("\n");
+  }).join("\n");
+}
+
+function formatSymbolResults(results: Record<string, unknown>[]): string {
+  if (results.length === 0) return "No Unity API symbols found.";
+  return results.map((result, index) => {
+    const fullName = String(result.fullName ?? result.title ?? "");
+    const pageId = String(result.pageId ?? "");
+    const kind = String(result.kind ?? "");
+    const signature = String(result.signature ?? "");
+    const summary = String(result.summary ?? "");
+    return [
+      `${index + 1}. ${fullName}${kind ? ` [${kind}]` : ""}`,
+      pageId ? `   Page: ${pageId}` : undefined,
+      signature ? `   Signature: ${truncate(signature, 900)}` : undefined,
+      summary ? `   Summary: ${truncate(summary, 500)}` : undefined,
+    ].filter(Boolean).join("\n");
+  }).join("\n");
+}
+
+function formatShowResult(value: unknown): string {
+  const result = value as { page?: Record<string, unknown>; sections?: Record<string, unknown>[]; truncated?: boolean };
+  const page = result.page ?? {};
+  const sections = result.sections ?? [];
+  const lines = [`# ${String(page.id ?? "")} — ${String(page.title ?? "")}`];
+  if (page.summary) lines.push(`Summary: ${String(page.summary)}`);
+  for (const section of sections) {
+    lines.push(`\n## ${String(section.headingPath ?? "")}`);
+    lines.push(String(section.text ?? ""));
+  }
+  if (result.truncated) lines.push("\n[truncated]");
+  return lines.join("\n");
+}
+
+function inferUnityVersionFromSource(sourcePath: string): string {
+  const normalized = sourcePath.replace(/\\/g, "/");
+  const match = normalized.match(/\/Editor\/([^/]+)\/Editor\/Data\/Documentation\/en$/i);
+  return match?.[1] ?? "unknown";
+}
+
+function defaultDbDir(version: string): string {
+  const localAppData = process.env.LOCALAPPDATA;
+  if (localAppData) return path.join(localAppData, "pi", "unity-docs", version);
+  return path.join(os.homedir(), ".pi", "unity-docs", version);
+}
+
+function buildCommonDbArgs(params: { db?: string; dbDir?: string; version?: string }): string[] {
+  const args: string[] = [];
+  if (params.db) args.push("--db", params.db);
+  if (params.dbDir) args.push("--db-dir", params.dbDir);
+  if (params.version) args.push("--version", params.version);
+  return args;
+}
+
+export default function (pi: ExtensionAPI) {
+  pi.registerCommand("unity-docs-configure", {
+    description: "Configure and optionally build the local Unity documentation database.",
+    handler: async (_args, ctx) => {
+      if (!ctx.hasUI) {
+        ctx.ui.notify("/unity-docs-configure requires an interactive UI. Use scripts/unity_docs_db.py configure instead.", "error");
+        return;
+      }
+
+      let discoveredSource = "";
+      try {
+        const info = await runScript(["--json", "info", "--discover"], 30_000);
+        const discovered = (info.json as { discoveredSources?: string[] } | undefined)?.discoveredSources ?? [];
+        discoveredSource = discovered[0] ?? "";
+      } catch {
+        discoveredSource = "";
+      }
+
+      const sourcePath = await ctx.ui.input("Unity documentation source directory", discoveredSource || "C:/Program Files/Unity/Hub/Editor/<version>/Editor/Data/Documentation/en");
+      if (!sourcePath) {
+        ctx.ui.notify("Unity docs configuration cancelled.", "info");
+        return;
+      }
+
+      const inferredVersion = inferUnityVersionFromSource(sourcePath);
+      const version = await ctx.ui.input("Unity version label", inferredVersion);
+      if (!version) {
+        ctx.ui.notify("Unity docs configuration cancelled.", "info");
+        return;
+      }
+
+      const dbDir = await ctx.ui.input("Database install directory", defaultDbDir(version));
+      if (!dbDir) {
+        ctx.ui.notify("Unity docs configuration cancelled.", "info");
+        return;
+      }
+
+      const configured = await runScript(["--json", "configure", "--source", sourcePath, "--db-dir", dbDir, "--version", version, "--yes"], 60_000);
+      const buildNow = await ctx.ui.confirm("Build Unity docs database now?", "This may take several minutes for the full ScriptReference.");
+      if (!buildNow) {
+        ctx.ui.notify(`Configured Unity docs database. Build later with unity_docs_build_database or scripts/unity_docs_db.py build.\n${configured.stdout.trim()}`, "info");
+        return;
+      }
+
+      ctx.ui.notify("Building Unity docs database. This may take several minutes...", "info");
+      const built = await runScript(
+        ["--json", "build", "--source", sourcePath, "--db-dir", dbDir, "--version", version, "--force", "--progress"],
+        3_600_000,
+        (message) => ctx.ui.setStatus("unity-docs", message),
+      );
+      ctx.ui.setStatus("unity-docs", "Unity docs build complete");
+      ctx.ui.notify(`Unity docs database built.\n${built.stdout.trim()}`, "info");
+    },
+  });
+
+  pi.registerTool({
+    name: "unity_docs_info",
+    label: "Unity Docs Info",
+    description: "Show local Unity documentation database configuration and status.",
+    promptSnippet: "Show Unity documentation cache configuration and database status.",
+    promptGuidelines: ["Use unity_docs_info when the Unity docs cache status or configured database path is unknown."],
+    parameters: Type.Object({
+      discover: Type.Optional(Type.Boolean({ description: "Include discovered Unity Documentation/en source directories." })),
+      db: Type.Optional(Type.String({ description: "Explicit SQLite database path." })),
+      dbDir: Type.Optional(Type.String({ description: "Directory containing unity_docs.sqlite." })),
+      version: Type.Optional(Type.String({ description: "Unity version label from config." })),
+    }),
+    async execute(_toolCallId, params) {
+      const args = ["--json", "info", ...buildCommonDbArgs(params)];
+      if (params.discover) args.push("--discover");
+      const result = await runScript(args, 60_000);
+      return {
+        content: [{ type: "text", text: JSON.stringify(result.json, null, 2) }],
+        details: result.json as object,
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "unity_docs_search",
+    label: "Unity Docs Search",
+    description: "Search the local Unity Manual and ScriptReference SQLite FTS cache and return compact section snippets.",
+    promptSnippet: "Search local Unity documentation by terms and return compact section snippets.",
+    promptGuidelines: [
+      "Use unity_docs_search for Unity Manual or Scripting API documentation lookups when exact symbol lookup is insufficient.",
+      "For token efficiency, call unity_docs_show only for the most relevant result sections after unity_docs_search.",
+    ],
+    parameters: Type.Object({
+      query: Type.String({ description: "Search terms, for example 'Physics.Raycast layerMask trigger'." }),
+      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50, default: 8 })),
+      corpus: Type.Optional(Type.Union([Type.Literal("Manual"), Type.Literal("ScriptReference")], { description: "Optional corpus filter." })),
+      db: Type.Optional(Type.String({ description: "Explicit SQLite database path." })),
+      dbDir: Type.Optional(Type.String({ description: "Directory containing unity_docs.sqlite." })),
+      version: Type.Optional(Type.String({ description: "Unity version label from config." })),
+    }),
+    async execute(_toolCallId, params) {
+      const args = ["--json", "search", params.query, "--limit", String(params.limit ?? 8), ...buildCommonDbArgs(params)];
+      if (params.corpus) args.push("--corpus", params.corpus);
+      const result = await runScript(args, 120_000);
+      const rows = asArray(result.json);
+      return {
+        content: [{ type: "text", text: formatSearchResults(rows) }],
+        details: { results: rows },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "unity_docs_symbol",
+    label: "Unity Docs Symbol",
+    description: "Look up Unity Scripting API pages by exact or near-exact symbol name.",
+    promptSnippet: "Look up Unity Scripting API symbols such as UnityEngine.Physics.Raycast.",
+    promptGuidelines: ["Use unity_docs_symbol before unity_docs_search for API-like Unity queries such as Physics.Raycast or GameObject.AddComponent."],
+    parameters: Type.Object({
+      name: Type.String({ description: "API symbol, for example 'UnityEngine.Physics.Raycast' or 'Physics.Raycast'." }),
+      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50, default: 8 })),
+      db: Type.Optional(Type.String({ description: "Explicit SQLite database path." })),
+      dbDir: Type.Optional(Type.String({ description: "Directory containing unity_docs.sqlite." })),
+      version: Type.Optional(Type.String({ description: "Unity version label from config." })),
+    }),
+    async execute(_toolCallId, params) {
+      const result = await runScript(["--json", "symbol", params.name, "--limit", String(params.limit ?? 8), ...buildCommonDbArgs(params)], 120_000);
+      const rows = asArray(result.json);
+      return {
+        content: [{ type: "text", text: formatSymbolResults(rows) }],
+        details: { results: rows },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "unity_docs_show",
+    label: "Unity Docs Show",
+    description: "Retrieve compact sections from a local Unity documentation page.",
+    promptSnippet: "Show selected sections from a local Unity documentation page.",
+    promptGuidelines: ["Use unity_docs_show after unity_docs_symbol or unity_docs_search, requesting only the sections needed to answer the user."],
+    parameters: Type.Object({
+      page: Type.String({ description: "Page id, slug, title, or url path, for example 'ScriptReference/Physics.Raycast'." }),
+      sections: Type.Optional(Type.Array(Type.String(), { description: "Optional heading filters, for example ['Declaration','Parameters','Description']." })),
+      maxChars: Type.Optional(Type.Integer({ minimum: 500, maximum: 50000, default: 6000 })),
+      db: Type.Optional(Type.String({ description: "Explicit SQLite database path." })),
+      dbDir: Type.Optional(Type.String({ description: "Directory containing unity_docs.sqlite." })),
+      version: Type.Optional(Type.String({ description: "Unity version label from config." })),
+    }),
+    async execute(_toolCallId, params) {
+      const args = ["--json", "show", params.page, "--max-chars", String(params.maxChars ?? 6000), ...buildCommonDbArgs(params)];
+      if (params.sections?.length) args.push("--sections", params.sections.join(","));
+      const result = await runScript(args, 120_000);
+      return {
+        content: [{ type: "text", text: formatShowResult(result.json) }],
+        details: result.json as object,
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "unity_docs_build_database",
+    label: "Unity Docs Build Database",
+    description: "Build or rebuild the local SQLite Unity documentation cache. Use only when explicitly requested by the user.",
+    promptSnippet: "Build or rebuild the SQLite Unity documentation cache from an installed Unity docs directory.",
+    promptGuidelines: ["Use unity_docs_build_database only when the user explicitly asks to build or rebuild the Unity docs cache."],
+    parameters: Type.Object({
+      sourcePath: Type.String({ description: "Unity Documentation/en source directory." }),
+      dbDir: Type.String({ description: "Directory where unity_docs.sqlite should be installed." }),
+      version: Type.Optional(Type.String({ description: "Unity version label. Inferred from source path when omitted." })),
+      force: Type.Optional(Type.Boolean({ default: false, description: "Replace an existing database." })),
+      limit: Type.Optional(Type.Integer({ minimum: 1, description: "Debug/testing: process only this many pages." })),
+    }),
+    async execute(_toolCallId, params, _signal, onUpdate) {
+      const version = params.version ?? inferUnityVersionFromSource(params.sourcePath);
+      const args = ["--json", "build", "--source", params.sourcePath, "--db-dir", params.dbDir, "--version", version, "--progress"];
+      if (params.force) args.push("--force");
+      if (params.limit) args.push("--limit", String(params.limit));
+      onUpdate?.({ content: [{ type: "text", text: "Building Unity docs database. This can take several minutes..." }] });
+      const result = await runScript(args, 3_600_000, (message) => {
+        onUpdate?.({ content: [{ type: "text", text: message }] });
+      });
+      return {
+        content: [{ type: "text", text: `Unity docs database build complete.\n${JSON.stringify(result.json, null, 2)}` }],
+        details: result.json as object,
+      };
+    },
+  });
+}
