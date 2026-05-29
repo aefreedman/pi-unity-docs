@@ -1,5 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { Text } from "@earendil-works/pi-tui";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -15,6 +16,71 @@ type ScriptResult = {
   exitCode: number | null;
   json?: unknown;
 };
+
+type TextToolResult = {
+  content?: Array<{ type: string; text?: string }>;
+  details?: unknown;
+};
+
+function shortenDisplay(value: string, max = 80): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length <= max) return normalized;
+  return `${normalized.slice(0, max - 1)}…`;
+}
+
+function replaceTabs(value: string): string {
+  return value.replace(/\t/g, "    ");
+}
+
+function trimTrailingEmptyLines(lines: string[]): string[] {
+  let end = lines.length;
+  while (end > 0 && lines[end - 1] === "") {
+    end--;
+  }
+  return lines.slice(0, end);
+}
+
+function getTextOutput(result: TextToolResult): string {
+  return result.content
+    ?.filter((content) => content.type === "text" && typeof content.text === "string")
+    .map((content) => content.text ?? "")
+    .join("\n") ?? "";
+}
+
+function renderReadStyleCall(label: string, target: string | undefined, theme: any, context: any): Text {
+  const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+  const targetText = target ? theme.fg("accent", shortenDisplay(target)) : theme.fg("toolOutput", "...");
+  text.setText(`${theme.fg("toolTitle", theme.bold(label))} ${targetText}`);
+  return text;
+}
+
+function renderReadStyleResult(result: TextToolResult, options: { expanded?: boolean; isPartial?: boolean }, theme: any, context: any): Text {
+  const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+  const output = getTextOutput(result);
+
+  if (options.isPartial) {
+    const lastLine = trimTrailingEmptyLines(output.split("\n")).at(-1) ?? "Running...";
+    text.setText(theme.fg("warning", shortenDisplay(lastLine, 140)));
+    return text;
+  }
+
+  if (!options.expanded && !context.isError) {
+    text.setText("");
+    return text;
+  }
+
+  const renderedLines = trimTrailingEmptyLines(output.split("\n").map(replaceTabs));
+  const maxLines = options.expanded ? renderedLines.length : 10;
+  const displayLines = renderedLines.slice(0, maxLines);
+  const remaining = renderedLines.length - maxLines;
+  let rendered = displayLines.map((line) => theme.fg("toolOutput", line)).join("\n");
+  if (rendered) rendered = `\n${rendered}`;
+  if (remaining > 0) {
+    rendered += theme.fg("muted", `\n... (${remaining} more lines, expand to show all)`);
+  }
+  text.setText(rendered);
+  return text;
+}
 
 function formatProgressLine(line: string): string | null {
   if (!line.startsWith("PROGRESS ")) return null;
@@ -252,6 +318,12 @@ export default function (pi: ExtensionAPI) {
       dbDir: Type.Optional(Type.String({ description: "Directory containing unity_docs.sqlite." })),
       version: Type.Optional(Type.String({ description: "Unity version label from config." })),
     }),
+    renderCall(args, theme, context) {
+      return renderReadStyleCall("unity docs info", args.version ?? args.dbDir ?? args.db ?? "configured database", theme, context);
+    },
+    renderResult(result, options, theme, context) {
+      return renderReadStyleResult(result, options, theme, context);
+    },
     async execute(_toolCallId, params) {
       const args = ["--json", "info", ...buildCommonDbArgs(params)];
       if (params.discover) args.push("--discover");
@@ -280,6 +352,12 @@ export default function (pi: ExtensionAPI) {
       dbDir: Type.Optional(Type.String({ description: "Directory containing unity_docs.sqlite." })),
       version: Type.Optional(Type.String({ description: "Unity version label from config." })),
     }),
+    renderCall(args, theme, context) {
+      return renderReadStyleCall("unity docs search", args.query, theme, context);
+    },
+    renderResult(result, options, theme, context) {
+      return renderReadStyleResult(result, options, theme, context);
+    },
     async execute(_toolCallId, params) {
       const args = ["--json", "search", params.query, "--limit", String(params.limit ?? 8), ...buildCommonDbArgs(params)];
       if (params.corpus) args.push("--corpus", params.corpus);
@@ -305,6 +383,12 @@ export default function (pi: ExtensionAPI) {
       dbDir: Type.Optional(Type.String({ description: "Directory containing unity_docs.sqlite." })),
       version: Type.Optional(Type.String({ description: "Unity version label from config." })),
     }),
+    renderCall(args, theme, context) {
+      return renderReadStyleCall("unity docs symbol", args.name, theme, context);
+    },
+    renderResult(result, options, theme, context) {
+      return renderReadStyleResult(result, options, theme, context);
+    },
     async execute(_toolCallId, params) {
       const result = await runScript(["--json", "symbol", params.name, "--limit", String(params.limit ?? 8), ...buildCommonDbArgs(params)], 120_000);
       const rows = asArray(result.json);
@@ -329,6 +413,12 @@ export default function (pi: ExtensionAPI) {
       dbDir: Type.Optional(Type.String({ description: "Directory containing unity_docs.sqlite." })),
       version: Type.Optional(Type.String({ description: "Unity version label from config." })),
     }),
+    renderCall(args, theme, context) {
+      return renderReadStyleCall("unity docs show", args.page, theme, context);
+    },
+    renderResult(result, options, theme, context) {
+      return renderReadStyleResult(result, options, theme, context);
+    },
     async execute(_toolCallId, params) {
       const args = ["--json", "show", params.page, "--max-chars", String(params.maxChars ?? 6000), ...buildCommonDbArgs(params)];
       if (params.sections?.length) args.push("--sections", params.sections.join(","));
@@ -353,6 +443,12 @@ export default function (pi: ExtensionAPI) {
       force: Type.Optional(Type.Boolean({ default: false, description: "Replace an existing database." })),
       limit: Type.Optional(Type.Integer({ minimum: 1, description: "Debug/testing: process only this many pages." })),
     }),
+    renderCall(args, theme, context) {
+      return renderReadStyleCall("unity docs build", args.version ?? args.dbDir, theme, context);
+    },
+    renderResult(result, options, theme, context) {
+      return renderReadStyleResult(result, options, theme, context);
+    },
     async execute(_toolCallId, params, _signal, onUpdate) {
       const version = params.version ?? inferUnityVersionFromSource(params.sourcePath);
       const args = ["--json", "build", "--source", params.sourcePath, "--db-dir", params.dbDir, "--version", version, "--progress"];
