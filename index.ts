@@ -54,7 +54,78 @@ function renderReadStyleCall(label: string, target: string | undefined, theme: a
   return text;
 }
 
-function renderReadStyleResult(result: TextToolResult, options: { expanded?: boolean; isPartial?: boolean }, theme: any, context: any): Text {
+function asRecord(value: unknown): Record<string, any> | undefined {
+  return typeof value === "object" && value !== null ? value as Record<string, any> : undefined;
+}
+
+function asResultArray(value: unknown): Record<string, any>[] {
+  return Array.isArray(value) ? value.filter((item): item is Record<string, any> => typeof item === "object" && item !== null) : [];
+}
+
+function formatCount(value: unknown): string | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  const numberValue = typeof value === "number" ? value : Number.parseInt(String(value), 10);
+  return Number.isFinite(numberValue) ? numberValue.toLocaleString() : String(value);
+}
+
+function plural(count: number, singular: string, pluralText = `${singular}s`): string {
+  return `${count.toLocaleString()} ${count === 1 ? singular : pluralText}`;
+}
+
+function formatCollapsedSummary(kind: "info" | "search" | "symbol" | "show" | "build", result: TextToolResult): string | undefined {
+  const details = asRecord(result.details);
+  if (!details) return undefined;
+
+  if (kind === "info") {
+    const metadata = asRecord(details.metadata);
+    if (!details.dbExists) return "database not found";
+    const pages = formatCount(metadata?.pageCount);
+    const sections = formatCount(metadata?.sectionCount);
+    const symbols = formatCount(metadata?.symbolCount);
+    return ["database ready", pages ? `${pages} pages` : undefined, sections ? `${sections} sections` : undefined, symbols ? `${symbols} symbols` : undefined]
+      .filter(Boolean)
+      .join("; ");
+  }
+
+  if (kind === "search" || kind === "symbol") {
+    const results = asResultArray(details.results);
+    if (results.length === 0) return kind === "search" ? "no results" : "no symbols found";
+    const first = results[0];
+    const page = String(first.pageId ?? first.page ?? "");
+    const title = String(first.title ?? first.fullName ?? "");
+    const heading = String(first.headingPath ?? "");
+    const label = kind === "search" ? plural(results.length, "result") : plural(results.length, "symbol");
+    const target = [page, title && title !== page ? title : undefined].filter(Boolean).join(" — ");
+    return [label, target ? `top: ${target}` : undefined, heading ? `section: ${heading}` : undefined]
+      .filter(Boolean)
+      .join("; ");
+  }
+
+  if (kind === "show") {
+    const page = asRecord(details.page);
+    const sections = asResultArray(details.sections);
+    const pageLabel = [page?.id, page?.title && page.title !== page.id ? page.title : undefined].filter(Boolean).join(" — ");
+    return [pageLabel || "page loaded", plural(sections.length, "section"), details.truncated ? "truncated" : undefined]
+      .filter(Boolean)
+      .join("; ");
+  }
+
+  const pages = formatCount(details.pages);
+  const sections = formatCount(details.sections);
+  const symbols = formatCount(details.symbols);
+  const elapsed = details.elapsedSeconds ? `${details.elapsedSeconds}s` : undefined;
+  return ["build complete", pages ? `${pages} pages` : undefined, sections ? `${sections} sections` : undefined, symbols ? `${symbols} symbols` : undefined, elapsed]
+    .filter(Boolean)
+    .join("; ");
+}
+
+function renderReadStyleResult(
+  kind: "info" | "search" | "symbol" | "show" | "build",
+  result: TextToolResult,
+  options: { expanded?: boolean; isPartial?: boolean },
+  theme: any,
+  context: any,
+): Text {
   const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
   const output = getTextOutput(result);
 
@@ -65,7 +136,8 @@ function renderReadStyleResult(result: TextToolResult, options: { expanded?: boo
   }
 
   if (!options.expanded && !context.isError) {
-    text.setText("");
+    const summary = formatCollapsedSummary(kind, result);
+    text.setText(summary ? theme.fg("toolOutput", shortenDisplay(summary, 180)) + theme.fg("dim", " (expand to read)") : "");
     return text;
   }
 
@@ -322,7 +394,7 @@ export default function (pi: ExtensionAPI) {
       return renderReadStyleCall("unity docs info", args.version ?? args.dbDir ?? args.db ?? "configured database", theme, context);
     },
     renderResult(result, options, theme, context) {
-      return renderReadStyleResult(result, options, theme, context);
+      return renderReadStyleResult("info", result, options, theme, context);
     },
     async execute(_toolCallId, params) {
       const args = ["--json", "info", ...buildCommonDbArgs(params)];
@@ -356,7 +428,7 @@ export default function (pi: ExtensionAPI) {
       return renderReadStyleCall("unity docs search", args.query, theme, context);
     },
     renderResult(result, options, theme, context) {
-      return renderReadStyleResult(result, options, theme, context);
+      return renderReadStyleResult("search", result, options, theme, context);
     },
     async execute(_toolCallId, params) {
       const args = ["--json", "search", params.query, "--limit", String(params.limit ?? 8), ...buildCommonDbArgs(params)];
@@ -387,7 +459,7 @@ export default function (pi: ExtensionAPI) {
       return renderReadStyleCall("unity docs symbol", args.name, theme, context);
     },
     renderResult(result, options, theme, context) {
-      return renderReadStyleResult(result, options, theme, context);
+      return renderReadStyleResult("symbol", result, options, theme, context);
     },
     async execute(_toolCallId, params) {
       const result = await runScript(["--json", "symbol", params.name, "--limit", String(params.limit ?? 8), ...buildCommonDbArgs(params)], 120_000);
@@ -417,7 +489,7 @@ export default function (pi: ExtensionAPI) {
       return renderReadStyleCall("unity docs show", args.page, theme, context);
     },
     renderResult(result, options, theme, context) {
-      return renderReadStyleResult(result, options, theme, context);
+      return renderReadStyleResult("show", result, options, theme, context);
     },
     async execute(_toolCallId, params) {
       const args = ["--json", "show", params.page, "--max-chars", String(params.maxChars ?? 6000), ...buildCommonDbArgs(params)];
@@ -447,7 +519,7 @@ export default function (pi: ExtensionAPI) {
       return renderReadStyleCall("unity docs build", args.version ?? args.dbDir, theme, context);
     },
     renderResult(result, options, theme, context) {
-      return renderReadStyleResult(result, options, theme, context);
+      return renderReadStyleResult("build", result, options, theme, context);
     },
     async execute(_toolCallId, params, _signal, onUpdate) {
       const version = params.version ?? inferUnityVersionFromSource(params.sourcePath);
