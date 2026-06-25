@@ -402,6 +402,95 @@ def validate_source(source: Path) -> None:
         raise SystemExit(f"Unity documentation source is missing {', '.join(missing)}: {source}")
 
 
+def normalize_package_docs_source(source: Path) -> Path:
+    source = source.expanduser()
+    if source.name == "Documentation~":
+        return source
+    docs = source / "Documentation~"
+    if docs.is_dir():
+        return docs
+    return source
+
+
+def validate_package_source(source: Path) -> None:
+    if not source.exists():
+        raise SystemExit(f"Package documentation source does not exist: {source}")
+    if not source.is_dir():
+        raise SystemExit(f"Package documentation source is not a directory: {source}")
+    if not any(source.rglob("*.md")):
+        raise SystemExit(f"Package documentation source contains no Markdown files: {source}")
+
+
+def find_package_root(docs_source: Path) -> Path:
+    if docs_source.name == "Documentation~":
+        return docs_source.parent
+    return docs_source
+
+
+def load_package_metadata(package_root: Path) -> dict[str, Any]:
+    package_json = package_root / "package.json"
+    if not package_json.exists():
+        return {}
+    try:
+        return json.loads(package_json.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return {}
+
+
+def sanitize_docset_id(value: str) -> str:
+    normalized = re.sub(r"[^A-Za-z0-9_.-]+", "-", value.strip().lower()).strip("-.")
+    return normalized or "package-docs"
+
+
+def resolve_package_docs_source(source: str | None, project: str | None, package_name: str | None, package_version: str | None) -> tuple[Path, str, Path | None]:
+    if source:
+        docs = normalize_package_docs_source(Path(source))
+        validate_package_source(docs)
+        return docs, "explicit", None
+
+    if not project or not package_name:
+        raise SystemExit("Pass --source or pass both --project and --package-name.")
+
+    project_path = Path(project).expanduser()
+    if not project_path.exists():
+        raise SystemExit(f"Unity project path does not exist: {project_path}")
+
+    embedded = project_path / "Packages" / package_name / "Documentation~"
+    if embedded.is_dir():
+        validate_package_source(embedded)
+        return embedded, "embedded-package", project_path
+
+    package_cache = project_path / "Library" / "PackageCache"
+    candidate_versions: list[str] = []
+    if package_version:
+        candidate_versions.append(package_version)
+
+    lock_path = project_path / "Packages" / "packages-lock.json"
+    if lock_path.exists():
+        try:
+            lock = json.loads(lock_path.read_text(encoding="utf-8", errors="replace"))
+            version = ((lock.get("dependencies") or {}).get(package_name) or {}).get("version")
+            if version and version not in candidate_versions:
+                candidate_versions.append(str(version))
+        except Exception:
+            pass
+
+    for version in candidate_versions:
+        cached = package_cache / f"{package_name}@{version}" / "Documentation~"
+        if cached.is_dir():
+            validate_package_source(cached)
+            return cached, "package-cache", project_path
+
+    if package_cache.is_dir():
+        matches = sorted(package_cache.glob(f"{package_name}@*/Documentation~"), key=lambda path: path.as_posix(), reverse=True)
+        for match in matches:
+            if match.is_dir():
+                validate_package_source(match)
+                return match, "package-cache", project_path
+
+    raise SystemExit(f"Could not find Documentation~ for package '{package_name}' under project: {project_path}")
+
+
 def discover_sources() -> list[Path]:
     roots: list[Path] = []
     program_files = os.environ.get("ProgramFiles")
@@ -429,6 +518,81 @@ def parse_html_sections(path: Path) -> tuple[str, list[ParsedSection]]:
         return "", []
     best = max(candidates, key=lambda c: (c.has_h1, c.total_chars))
     return best.title, best.sections
+
+
+def parse_frontmatter(lines: list[str]) -> tuple[dict[str, str], list[str]]:
+    if not lines or lines[0].strip() != "---":
+        return {}, lines
+    metadata: dict[str, str] = {}
+    for index in range(1, len(lines)):
+        if lines[index].strip() == "---":
+            for raw in lines[1:index]:
+                if ":" not in raw:
+                    continue
+                key, value = raw.split(":", 1)
+                metadata[key.strip()] = value.strip().strip('"\'')
+            return metadata, lines[index + 1:]
+    return {}, lines
+
+
+def clean_markdown_text(value: str) -> str:
+    value = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", value)
+    value = re.sub(r"\[([^\]]+)\]\(([^)]*)\)", r"\1", value)
+    value = re.sub(r"\[([^\]]+)\]\[[^\]]+\]", r"\1", value)
+    value = re.sub(r"`([^`]+)`", r"\1", value)
+    value = re.sub(r"\*\*([^*]+)\*\*", r"\1", value)
+    value = re.sub(r"__([^_]+)__", r"\1", value)
+    value = re.sub(r"<br\s*/?>", "\n", value, flags=re.IGNORECASE)
+    value = re.sub(r"<[^>]+>", "", value)
+    value = value.replace("xref:", "")
+    return normalize_space(value)
+
+
+def parse_markdown_sections(path: Path) -> tuple[str, str | None, list[ParsedSection]]:
+    raw_lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    frontmatter, lines = parse_frontmatter(raw_lines)
+    title = ""
+    sections: list[ParsedSection] = []
+    heading_stack: dict[int, str] = {}
+    current_heading = "Overview"
+    current_parts: list[str] = []
+    in_fence = False
+
+    def flush() -> None:
+        nonlocal current_parts
+        text = "\n".join(part for part in current_parts if part).strip()
+        if text:
+            sections.append(ParsedSection(current_heading, text))
+        current_parts = []
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            in_fence = not in_fence
+            current_parts.append(stripped)
+            continue
+        if not in_fence:
+            match = re.match(r"^(#{1,6})\s+(.+?)\s*#*\s*$", stripped)
+            if match:
+                flush()
+                level = len(match.group(1))
+                heading = clean_markdown_text(match.group(2))
+                if level == 1 and not title:
+                    title = heading
+                heading_stack[level] = heading
+                for existing in list(heading_stack):
+                    if existing > level:
+                        del heading_stack[existing]
+                current_heading = " > ".join(heading_stack[index] for index in sorted(heading_stack) if heading_stack[index]) or "Overview"
+                continue
+        cleaned = stripped if in_fence else clean_markdown_text(stripped)
+        if cleaned:
+            current_parts.append(cleaned)
+    flush()
+
+    if not title:
+        title = clean_markdown_text(path.stem.replace("-", " ").replace("_", " ")) or path.stem
+    return title, frontmatter.get("uid"), sections
 
 
 def infer_kind(corpus: str, slug: str, title: str, sections: list[ParsedSection]) -> str:
@@ -673,6 +837,156 @@ def build_database(source: Path, db_path: Path, version: str, force: bool = Fals
     return {"dbPath": str(db_path), "sourcePath": str(source), "version": version, "elapsedSeconds": round(elapsed, 2), **counts}
 
 
+def build_package_docset(
+    source: Path,
+    db_path: Path,
+    docset_id: str,
+    title: str | None = None,
+    package_name: str | None = None,
+    package_version: str | None = None,
+    force: bool = False,
+    limit: int | None = None,
+    write_config: bool = True,
+    progress: bool = False,
+    source_kind: str = "explicit",
+    project_path: Path | None = None,
+) -> dict[str, Any]:
+    source = normalize_package_docs_source(source)
+    validate_package_source(source)
+    if db_path.exists() and not force:
+        raise SystemExit(f"Database already exists. Pass --force to replace: {db_path}")
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    package_root = find_package_root(source)
+    metadata = load_package_metadata(package_root)
+    package_name = package_name or metadata.get("name") or docset_id
+    package_version = package_version or metadata.get("version") or "unknown"
+    title = title or metadata.get("displayName") or metadata.get("name") or docset_id
+    docset_id = sanitize_docset_id(docset_id or package_name or title)
+
+    started = time.time()
+    tmp_fd, tmp_name = tempfile.mkstemp(prefix="unity_docs_package_", suffix=".sqlite", dir=str(db_path.parent))
+    os.close(tmp_fd)
+    tmp_path = Path(tmp_name)
+    counts = {"pages": 0, "sections": 0, "symbols": 0}
+    md_files = sorted(path for path in source.rglob("*.md") if path.is_file())
+    if limit is not None:
+        md_files = md_files[:limit]
+    total_pages = len(md_files)
+    last_progress_at = 0.0
+    last_progress_pages = -1
+
+    def emit_progress(stage: str, force_emit: bool = False) -> None:
+        nonlocal last_progress_at, last_progress_pages
+        if not progress:
+            return
+        now = time.time()
+        if not force_emit and now - last_progress_at < 5 and counts["pages"] - last_progress_pages < 100:
+            return
+        last_progress_at = now
+        last_progress_pages = counts["pages"]
+        percent = round((counts["pages"] / total_pages) * 100, 1) if total_pages else 100.0
+        message = {
+            "stage": stage,
+            "corpus": "Package",
+            "pages": counts["pages"],
+            "totalPages": total_pages,
+            "percent": percent,
+            "sections": counts["sections"],
+            "symbols": counts["symbols"],
+            "elapsed": format_elapsed(now - started),
+        }
+        print("PROGRESS " + json.dumps(message), file=sys.stderr, flush=True)
+
+    try:
+        emit_progress("starting", force_emit=True)
+        conn = sqlite3.connect(tmp_path)
+        create_schema(conn)
+        metadata_rows = {
+            "version": package_version,
+            "sourcePath": str(source),
+            "builtAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "docsetId": docset_id,
+            "docsetKind": "package",
+            "docsetTitle": title,
+            "packageName": package_name,
+            "packageVersion": package_version,
+            "sourceKind": source_kind,
+        }
+        if project_path:
+            metadata_rows["projectPath"] = str(project_path)
+        for key, value in metadata_rows.items():
+            conn.execute("INSERT INTO metadata(key, value) VALUES (?, ?)", (key, str(value)))
+
+        emit_progress("processing Package", force_emit=True)
+        for md_path in md_files:
+            rel = md_path.relative_to(source).as_posix()
+            slug = rel.rsplit(".", 1)[0]
+            page_id = f"Package/{slug}"
+            page_title, uid, sections = parse_markdown_sections(md_path)
+            summary = sections[0].text[:500] if sections else ""
+            conn.execute(
+                "INSERT INTO pages(id, version, corpus, slug, title, kind, uid, source_path, url_path, breadcrumbs, summary) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (page_id, package_version, "Package", slug, page_title, "package_page", uid, str(md_path), f"Package/{rel}", title, summary),
+            )
+            counts["pages"] += 1
+            emit_progress("processing Package")
+            if not sections and summary:
+                sections = [ParsedSection("Overview", summary)]
+            for ordinal, section in enumerate(sections):
+                sid = f"{page_id}#{ordinal:03d}"
+                conn.execute(
+                    "INSERT INTO sections(id, page_id, heading_path, ordinal, text, token_estimate) VALUES (?, ?, ?, ?, ?, ?)",
+                    (sid, page_id, section.heading_path, ordinal, section.text, token_estimate(section.text)),
+                )
+                conn.execute(
+                    "INSERT INTO sections_fts(section_id, page_id, title, heading_path, text) VALUES (?, ?, ?, ?, ?)",
+                    (sid, page_id, page_title, section.heading_path, section.text),
+                )
+                counts["sections"] += 1
+
+            symbol_candidates = [candidate for candidate in [uid, page_title, slug] if candidate]
+            for section in sections:
+                heading = section.heading_path.split(" > ")[-1]
+                if heading and heading not in symbol_candidates:
+                    symbol_candidates.append(heading)
+            for candidate in symbol_candidates:
+                conn.execute(
+                    "INSERT INTO symbols(page_id, uid, full_name, short_name, kind, signature) VALUES (?, ?, ?, ?, ?, ?)",
+                    (page_id, uid, candidate, candidate.split(".")[-1], "package_page", ""),
+                )
+                counts["symbols"] += 1
+        conn.commit()
+        conn.execute("INSERT OR REPLACE INTO metadata(key, value) VALUES (?, ?)", ("pageCount", str(counts["pages"])))
+        conn.execute("INSERT OR REPLACE INTO metadata(key, value) VALUES (?, ?)", ("sectionCount", str(counts["sections"])))
+        conn.execute("INSERT OR REPLACE INTO metadata(key, value) VALUES (?, ?)", ("symbolCount", str(counts["symbols"])))
+        conn.commit()
+        emit_progress("finalizing database", force_emit=True)
+        conn.execute("VACUUM")
+        conn.close()
+        shutil.move(str(tmp_path), str(db_path))
+        emit_progress("complete", force_emit=True)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+
+    elapsed = time.time() - started
+    if write_config:
+        update_docset_config(docset_id, {
+            "kind": "package",
+            "title": title,
+            "packageName": package_name,
+            "packageVersion": package_version,
+            "sourcePath": str(source),
+            "sourceKind": source_kind,
+            "projectPath": str(project_path) if project_path else None,
+            "dbPath": str(db_path),
+            "priority": 50,
+            "enabled": True,
+        })
+    return {"dbPath": str(db_path), "sourcePath": str(source), "docsetId": docset_id, "docsetKind": "package", "title": title, "packageName": package_name, "packageVersion": package_version, "sourceKind": source_kind, "elapsedSeconds": round(elapsed, 2), **counts}
+
+
 def update_config(version: str, source: Path, db_path: Path) -> None:
     config = load_config()
     config.setdefault("databases", {})[version] = {
@@ -680,6 +994,18 @@ def update_config(version: str, source: Path, db_path: Path) -> None:
         "dbPath": str(db_path),
     }
     config["activeVersion"] = version
+    save_config(config)
+
+
+def update_docset_config(docset_id: str, docset: dict[str, Any]) -> None:
+    config = load_config()
+    clean_docset = {key: value for key, value in docset.items() if value is not None}
+    config.setdefault("docsets", {})[docset_id] = clean_docset
+    profiles = config.setdefault("profiles", {})
+    default_profile = profiles.setdefault("default", [])
+    if docset_id not in default_profile:
+        default_profile.append(docset_id)
+    config.setdefault("activeProfile", "default")
     save_config(config)
 
 
@@ -702,7 +1028,118 @@ def row_dict(row: sqlite3.Row) -> dict[str, Any]:
     return {key: row[key] for key in row.keys()}
 
 
-def search_db(db_path: Path, query: str, limit: int, corpus: str | None = None) -> list[dict[str, Any]]:
+def read_db_metadata(db_path: Path) -> dict[str, str]:
+    if not db_path.exists():
+        return {}
+    conn = ensure_db(db_path)
+    try:
+        return {row["key"]: row["value"] for row in conn.execute("SELECT key, value FROM metadata")}
+    finally:
+        conn.close()
+
+
+def annotate_docset(item: dict[str, Any], docset: dict[str, Any]) -> dict[str, Any]:
+    if not docset:
+        return item
+    annotated = dict(item)
+    for key in ["docsetId", "docsetTitle", "docsetKind", "packageName", "packageVersion"]:
+        if docset.get(key) is not None:
+            annotated[key] = docset.get(key)
+    return annotated
+
+
+def docset_from_db_metadata(db_path: Path, fallback_id: str | None = None) -> dict[str, Any]:
+    metadata = read_db_metadata(db_path)
+    docset_id = metadata.get("docsetId") or fallback_id
+    title = metadata.get("docsetTitle") or metadata.get("packageName") or metadata.get("version") or docset_id
+    return {
+        "docsetId": docset_id,
+        "docsetTitle": title,
+        "docsetKind": metadata.get("docsetKind") or ("package" if metadata.get("packageName") else "unity"),
+        "packageName": metadata.get("packageName"),
+        "packageVersion": metadata.get("packageVersion"),
+    }
+
+
+def has_direct_db_selector(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "db", None) or getattr(args, "db_dir", None) or getattr(args, "version", None))
+
+
+def split_docset_ids(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def legacy_core_docset(config: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
+    version = config.get("activeVersion")
+    databases = config.get("databases") or {}
+    if not version or version not in databases or not databases[version].get("dbPath"):
+        return None
+    docset_id = sanitize_docset_id(f"unity-{version}")
+    return docset_id, {
+        "kind": "unity",
+        "title": f"Unity {version}",
+        "version": version,
+        "sourcePath": databases[version].get("sourcePath"),
+        "dbPath": databases[version].get("dbPath"),
+        "priority": 100,
+        "enabled": True,
+    }
+
+
+def resolve_query_docsets(args: argparse.Namespace) -> list[tuple[str, Path, dict[str, Any]]]:
+    if has_direct_db_selector(args):
+        db_path = resolve_db_path(args)
+        docset = docset_from_db_metadata(db_path)
+        return [(docset.get("docsetId") or "direct", db_path, docset)]
+
+    config = load_config()
+    docsets = dict(config.get("docsets") or {})
+    legacy_core = legacy_core_docset(config)
+    if legacy_core and legacy_core[0] not in docsets:
+        docsets[legacy_core[0]] = legacy_core[1]
+    if not docsets:
+        db_path = resolve_db_path(args)
+        docset = docset_from_db_metadata(db_path)
+        return [(docset.get("docsetId") or "legacy", db_path, docset)]
+
+    requested = split_docset_ids(getattr(args, "docsets", None))
+    if getattr(args, "docset", None):
+        requested.insert(0, args.docset)
+    if not requested:
+        profile_name = getattr(args, "profile", None) or config.get("activeProfile") or "default"
+        profiles = config.get("profiles") or {}
+        requested = list(profiles.get(profile_name) or [])
+        if legacy_core and legacy_core[0] not in requested:
+            requested.insert(0, legacy_core[0])
+    if not requested:
+        requested = [key for key, value in sorted(docsets.items(), key=lambda item: int((item[1] or {}).get("priority", 0)), reverse=True) if (value or {}).get("enabled", True)]
+
+    resolved: list[tuple[str, Path, dict[str, Any]]] = []
+    for docset_id in requested:
+        raw = docsets.get(docset_id)
+        if not raw or raw.get("enabled", True) is False:
+            continue
+        db_path_value = raw.get("dbPath")
+        if not db_path_value:
+            continue
+        db_path = Path(db_path_value).expanduser()
+        docset = {
+            "docsetId": docset_id,
+            "docsetTitle": raw.get("title") or docset_id,
+            "docsetKind": raw.get("kind") or "unity",
+            "packageName": raw.get("packageName"),
+            "packageVersion": raw.get("packageVersion"),
+            "priority": raw.get("priority", 0),
+        }
+        resolved.append((docset_id, db_path, docset))
+    if not resolved:
+        raise SystemExit("No enabled documentation docsets are configured for this query.")
+    return resolved
+
+
+def search_db(db_path: Path, query: str, limit: int, corpus: str | None = None, docset: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     conn = ensure_db(db_path)
     match = fts_query(query)
     params: list[Any] = [match]
@@ -728,10 +1165,24 @@ def search_db(db_path: Path, query: str, limit: int, corpus: str | None = None) 
     except sqlite3.OperationalError:
         rows = []
     conn.close()
-    return rows
+    return [annotate_docset(row, docset or {}) for row in rows]
 
 
-def symbol_db(db_path: Path, name: str, limit: int) -> list[dict[str, Any]]:
+def search_docsets(args: argparse.Namespace) -> list[dict[str, Any]]:
+    docsets = resolve_query_docsets(args)
+    merged: list[dict[str, Any]] = []
+    per_docset_limit = max(args.limit, 5)
+    for _docset_id, db_path, docset in docsets:
+        if not db_path.exists():
+            continue
+        for row in search_db(db_path, args.query, per_docset_limit, args.corpus, docset):
+            row["docsetPriority"] = docset.get("priority", 0)
+            merged.append(row)
+    merged.sort(key=lambda row: (-int(row.get("docsetPriority") or 0), float(row.get("rank") or 0)))
+    return merged[:args.limit]
+
+
+def symbol_db(db_path: Path, name: str, limit: int, docset: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     conn = ensure_db(db_path)
     clean = normalize_space(name)
     short = clean.split(".")[-1]
@@ -798,11 +1249,11 @@ def symbol_db(db_path: Path, name: str, limit: int) -> list[dict[str, Any]]:
         append_symbol_rows("sym.full_name GLOB ?", (f"*.{clean}",))
         if rows:
             conn.close()
-            return rows[:limit]
+            return [annotate_docset(row, docset or {}) for row in rows[:limit]]
     append_page_rows(clean)
     if rows:
         conn.close()
-        return rows[:limit]
+        return [annotate_docset(row, docset or {}) for row in rows[:limit]]
     append_symbol_rows("sym.short_name = ?", (clean,))
     if short != clean:
         append_symbol_rows("sym.short_name = ?", (short,))
@@ -810,7 +1261,22 @@ def symbol_db(db_path: Path, name: str, limit: int) -> list[dict[str, Any]]:
         append_symbol_rows("sym.full_name GLOB ?", (f"*{clean}*",))
 
     conn.close()
-    return rows[:limit]
+    return [annotate_docset(row, docset or {}) for row in rows[:limit]]
+
+
+def symbol_docsets(args: argparse.Namespace) -> list[dict[str, Any]]:
+    docsets = resolve_query_docsets(args)
+    merged: list[dict[str, Any]] = []
+    for _docset_id, db_path, docset in docsets:
+        if not db_path.exists():
+            continue
+        for row in symbol_db(db_path, args.name, max(args.limit, 5), docset):
+            exact = str(row.get("fullName") or "").lower() == args.name.lower() or str(row.get("shortName") or "").lower() == args.name.lower()
+            row["docsetPriority"] = docset.get("priority", 0)
+            row["exactMatch"] = exact
+            merged.append(row)
+    merged.sort(key=lambda row: (not row.get("exactMatch"), -int(row.get("docsetPriority") or 0), len(str(row.get("fullName") or ""))))
+    return merged[:args.limit]
 
 
 def resolve_page(conn: sqlite3.Connection, page: str) -> sqlite3.Row | None:
@@ -818,8 +1284,8 @@ def resolve_page(conn: sqlite3.Connection, page: str) -> sqlite3.Row | None:
     candidates = [clean]
     if clean.endswith(".html"):
         candidates.append(clean[:-5])
-    if not clean.startswith(("Manual/", "ScriptReference/")):
-        candidates.extend([f"Manual/{clean}", f"ScriptReference/{clean}"])
+    if not clean.startswith(("Manual/", "ScriptReference/", "Package/")):
+        candidates.extend([f"Manual/{clean}", f"ScriptReference/{clean}", f"Package/{clean}"])
     for candidate in candidates:
         row = conn.execute("SELECT * FROM pages WHERE id = ? OR slug = ? OR url_path = ? LIMIT 1", (candidate, candidate, candidate)).fetchone()
         if row:
@@ -830,7 +1296,7 @@ def resolve_page(conn: sqlite3.Connection, page: str) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM pages WHERE title LIKE ? OR slug LIKE ? LIMIT 1", (f"%{clean}%", f"%{clean}%")).fetchone()
 
 
-def show_db(db_path: Path, page: str, sections_filter: list[str] | None, max_chars: int) -> dict[str, Any]:
+def show_db(db_path: Path, page: str, sections_filter: list[str] | None, max_chars: int, docset: dict[str, Any] | None = None) -> dict[str, Any]:
     conn = ensure_db(db_path)
     page_row = resolve_page(conn, page)
     if not page_row:
@@ -855,9 +1321,42 @@ def show_db(db_path: Path, page: str, sections_filter: list[str] | None, max_cha
             truncated = True
         remaining -= len(text)
         output_sections.append({"headingPath": row["heading_path"], "text": text, "tokenEstimate": row["token_estimate"]})
-    result = {"page": row_dict(page_row), "sections": output_sections, "truncated": truncated}
+    page_data = annotate_docset(row_dict(page_row), docset or {})
+    result = {"page": page_data, "sections": output_sections, "truncated": truncated}
     conn.close()
     return result
+
+
+def show_docsets(args: argparse.Namespace, sections_filter: list[str] | None) -> dict[str, Any]:
+    page = args.page
+    explicit_docset = getattr(args, "docset", None)
+    if not explicit_docset and ":" in page:
+        possible_docset, possible_page = page.split(":", 1)
+        config = load_config()
+        if possible_docset in (config.get("docsets") or {}):
+            explicit_docset = possible_docset
+            page = possible_page
+    if explicit_docset:
+        args = argparse.Namespace(**{**vars(args), "docset": explicit_docset, "docsets": None, "page": page})
+    if has_direct_db_selector(args):
+        db_path = resolve_db_path(args)
+        return show_db(db_path, page, sections_filter, args.max_chars, docset_from_db_metadata(db_path))
+
+    matches: list[dict[str, Any]] = []
+    missing: list[str] = []
+    for docset_id, db_path, docset in resolve_query_docsets(args):
+        if not db_path.exists():
+            continue
+        try:
+            matches.append(show_db(db_path, page, sections_filter, args.max_chars, docset))
+        except SystemExit:
+            missing.append(docset_id)
+    if not matches:
+        raise SystemExit(f"No documentation page matched: {page}")
+    if len(matches) > 1 and not explicit_docset:
+        labels = ", ".join(str(match["page"].get("docsetId")) for match in matches)
+        raise SystemExit(f"Multiple documentation pages matched '{page}'. Pass --docset. Matches: {labels}")
+    return matches[0]
 
 
 def info_db(args: argparse.Namespace) -> dict[str, Any]:
@@ -880,6 +1379,26 @@ def info_db(args: argparse.Namespace) -> dict[str, Any]:
         metadata = {row["key"]: row["value"] for row in conn.execute("SELECT key, value FROM metadata")}
         info["metadata"] = metadata
         conn.close()
+    docset_status: dict[str, Any] = {}
+    configured_docsets = dict(config.get("docsets") or {})
+    legacy_core = legacy_core_docset(config)
+    if legacy_core and legacy_core[0] not in configured_docsets:
+        configured_docsets[legacy_core[0]] = legacy_core[1]
+    for docset_id, docset in configured_docsets.items():
+        db_path_value = docset.get("dbPath")
+        source_path_value = docset.get("sourcePath")
+        docset_db = Path(db_path_value).expanduser() if db_path_value else None
+        docset_source = Path(source_path_value).expanduser() if source_path_value else None
+        status: dict[str, Any] = {
+            **docset,
+            "dbExists": bool(docset_db and docset_db.exists()),
+            "sourceExists": bool(docset_source and docset_source.exists()),
+        }
+        if docset_db and docset_db.exists():
+            status["metadata"] = read_db_metadata(docset_db)
+        docset_status[docset_id] = status
+    if docset_status:
+        info["docsets"] = docset_status
     return info
 
 
@@ -939,18 +1458,18 @@ def cmd_build(args: argparse.Namespace) -> None:
 
 
 def cmd_search(args: argparse.Namespace) -> None:
-    data = search_db(resolve_db_path(args), args.query, args.limit, args.corpus)
+    data = search_docsets(args)
     print_json_or_text(data, args.json)
 
 
 def cmd_symbol(args: argparse.Namespace) -> None:
-    data = symbol_db(resolve_db_path(args), args.name, args.limit)
+    data = symbol_docsets(args)
     print_json_or_text(data, args.json)
 
 
 def cmd_show(args: argparse.Namespace) -> None:
     sections = [s.strip() for s in args.sections.split(",") if s.strip()] if args.sections else None
-    data = show_db(resolve_db_path(args), args.page, sections, args.max_chars)
+    data = show_docsets(args, sections)
     if args.json:
         print_json_or_text(data, True)
         return
@@ -966,6 +1485,30 @@ def cmd_show(args: argparse.Namespace) -> None:
 
 def cmd_info(args: argparse.Namespace) -> None:
     print_json_or_text(info_db(args), args.json)
+
+
+def cmd_build_docset(args: argparse.Namespace) -> None:
+    docs_source, source_kind, project_path = resolve_package_docs_source(args.source, args.project, args.package_name, args.package_version)
+    package_root = find_package_root(docs_source)
+    metadata = load_package_metadata(package_root)
+    package_name = args.package_name or metadata.get("name") or package_root.name.split("@")[0]
+    docset_id = sanitize_docset_id(args.docset_id or package_name)
+    db_path = resolve_db_path(args) if (args.db or args.db_dir) else db_path_from_dir(default_db_dir(docset_id))
+    result = build_package_docset(
+        docs_source,
+        db_path,
+        docset_id=docset_id,
+        title=args.title,
+        package_name=package_name,
+        package_version=args.package_version,
+        force=args.force,
+        limit=args.limit,
+        write_config=not args.no_config,
+        progress=args.progress,
+        source_kind=source_kind,
+        project_path=project_path,
+    )
+    print_json_or_text(result, args.json)
 
 
 def add_json_flag(parser: argparse.ArgumentParser) -> None:
@@ -997,11 +1540,29 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument("--progress", action="store_true", help="Emit progress JSON lines to stderr while building.")
     build.set_defaults(func=cmd_build)
 
+    build_docset = sub.add_parser("build-docset", help="Build or rebuild a package documentation docset.")
+    add_json_flag(build_docset)
+    build_docset.add_argument("--source", help="Package Documentation~ source directory or package root containing Documentation~.")
+    build_docset.add_argument("--project", help="Unity project path used to resolve embedded packages or Library/PackageCache packages.")
+    build_docset.add_argument("--package-name", help="Unity package name to resolve from a project or record in metadata.")
+    build_docset.add_argument("--package-version", help="Optional package version to resolve from PackageCache or record in metadata.")
+    build_docset.add_argument("--docset-id", help="Docset id to register. Defaults to the package name.")
+    build_docset.add_argument("--title", help="Human-readable docset title. Defaults to package displayName/name.")
+    build_docset.add_argument("--db", help="Explicit SQLite database path.")
+    build_docset.add_argument("--db-dir", help="Directory where unity_docs.sqlite should be installed.")
+    build_docset.add_argument("--force", action="store_true", help="Replace an existing database.")
+    build_docset.add_argument("--limit", type=int, help="Debug: only process this many Markdown pages.")
+    build_docset.add_argument("--no-config", action="store_true", help="Do not update ~/.pi/unity-docs/config.json after building.")
+    build_docset.add_argument("--progress", action="store_true", help="Emit progress JSON lines to stderr while building.")
+    build_docset.set_defaults(func=cmd_build_docset)
+
     info = sub.add_parser("info", help="Show configuration and database status.")
     add_json_flag(info)
     info.add_argument("--db", help="Explicit SQLite database path.")
     info.add_argument("--db-dir", help="Directory containing unity_docs.sqlite.")
     info.add_argument("--version", help="Unity version label from config.")
+    info.add_argument("--profile", help="Documentation profile to inspect.")
+    info.add_argument("--docset", help="Documentation docset id to inspect.")
     info.add_argument("--discover", action="store_true", help="Include discovered Unity documentation sources.")
     info.set_defaults(func=cmd_info)
 
@@ -1011,8 +1572,11 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--db", help="Explicit SQLite database path.")
     search.add_argument("--db-dir", help="Directory containing unity_docs.sqlite.")
     search.add_argument("--version", help="Unity version label from config.")
+    search.add_argument("--profile", help="Documentation profile to search.")
+    search.add_argument("--docset", help="Documentation docset id to search.")
+    search.add_argument("--docsets", help="Comma-separated documentation docset ids to search.")
     search.add_argument("--limit", type=int, default=8)
-    search.add_argument("--corpus", choices=["Manual", "ScriptReference"], help="Limit search to a corpus.")
+    search.add_argument("--corpus", choices=["Manual", "ScriptReference", "Package"], help="Limit search to a corpus.")
     search.set_defaults(func=cmd_search)
 
     symbol = sub.add_parser("symbol", help="Look up a Unity API symbol.")
@@ -1021,6 +1585,9 @@ def build_parser() -> argparse.ArgumentParser:
     symbol.add_argument("--db", help="Explicit SQLite database path.")
     symbol.add_argument("--db-dir", help="Directory containing unity_docs.sqlite.")
     symbol.add_argument("--version", help="Unity version label from config.")
+    symbol.add_argument("--profile", help="Documentation profile to search.")
+    symbol.add_argument("--docset", help="Documentation docset id to search.")
+    symbol.add_argument("--docsets", help="Comma-separated documentation docset ids to search.")
     symbol.add_argument("--limit", type=int, default=8)
     symbol.set_defaults(func=cmd_symbol)
 
@@ -1030,6 +1597,9 @@ def build_parser() -> argparse.ArgumentParser:
     show.add_argument("--db", help="Explicit SQLite database path.")
     show.add_argument("--db-dir", help="Directory containing unity_docs.sqlite.")
     show.add_argument("--version", help="Unity version label from config.")
+    show.add_argument("--profile", help="Documentation profile to search.")
+    show.add_argument("--docset", help="Documentation docset id to search.")
+    show.add_argument("--docsets", help="Comma-separated documentation docset ids to search.")
     show.add_argument("--sections", help="Comma-separated heading filters.")
     show.add_argument("--max-chars", type=int, default=6000)
     show.set_defaults(func=cmd_show)

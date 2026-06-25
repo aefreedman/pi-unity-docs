@@ -5,7 +5,7 @@ description: Retrieve local Unity Manual and Scripting API documentation through
 
 # Using Unity Docs
 
-Use this skill when the user asks about Unity APIs, Unity Manual behavior, Editor workflows, package features documented in the installed Unity docs, or version-specific Unity documentation.
+Use this skill when the user asks about Unity APIs, Unity Manual behavior, Editor workflows, package features documented in installed Unity docs or configured package docsets, or version-specific Unity documentation.
 
 ## Preferred retrieval order
 
@@ -44,6 +44,8 @@ Status/configuration:
 unity_docs_info()
 ```
 
+Package/plugin docs configured as separate docsets are searched with the active docs profile by default. Use `docset` or `docsets` filters only when you need to narrow results or disambiguate a `unity_docs_show` call.
+
 ## Building the cache
 
 Only build or rebuild when the user asks, or when `unity_docs_info` shows the cache is missing and the user approves.
@@ -55,3 +57,5 @@ Use the interactive pi command when available:
 ```
 
 Or use the tool/CLI with an explicit Unity documentation source and database install directory.
+
+For package/plugin documentation, use `unity_docs_build_docset` only when explicitly asked. It can build from an explicit `Documentation~` path, a package root containing `Documentation~`, or a Unity project path plus package name so project `Packages/` and `Library/PackageCache/` sources can be resolved without copying package repositories into `pi-unity-docs`.

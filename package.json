@@ -23,7 +23,7 @@
     ]
   },
   "scripts": {
-    "test": "python -m py_compile scripts/unity_docs_db.py"
+    "test": "python -m py_compile scripts/unity_docs_db.py && python tests/package-docsets.test.py"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
