@@ -264,8 +264,9 @@ function formatSearchResults(results: Record<string, unknown>[]): string {
     const title = String(result.title ?? "");
     const heading = String(result.headingPath ?? "");
     const snippet = String(result.snippet ?? "").replace(/\s+/g, " ").trim();
+    const docset = String(result.docsetTitle ?? result.docsetId ?? "");
     return [
-      `${index + 1}. ${pageId} — ${title}`,
+      `${index + 1}. ${pageId} — ${title}${docset ? ` [${docset}]` : ""}`,
       heading ? `   Section: ${heading}` : undefined,
       snippet ? `   ${truncate(snippet, 700)}` : undefined,
     ].filter(Boolean).join("\n");
@@ -280,8 +281,9 @@ function formatSymbolResults(results: Record<string, unknown>[]): string {
     const kind = String(result.kind ?? "");
     const signature = String(result.signature ?? "");
     const summary = String(result.summary ?? "");
+    const docset = String(result.docsetTitle ?? result.docsetId ?? "");
     return [
-      `${index + 1}. ${fullName}${kind ? ` [${kind}]` : ""}`,
+      `${index + 1}. ${fullName}${kind ? ` [${kind}]` : ""}${docset ? ` [${docset}]` : ""}`,
       pageId ? `   Page: ${pageId}` : undefined,
       signature ? `   Signature: ${truncate(signature, 900)}` : undefined,
       summary ? `   Summary: ${truncate(summary, 500)}` : undefined,
@@ -293,7 +295,8 @@ function formatShowResult(value: unknown): string {
   const result = value as { page?: Record<string, unknown>; sections?: Record<string, unknown>[]; truncated?: boolean };
   const page = result.page ?? {};
   const sections = result.sections ?? [];
-  const lines = [`# ${String(page.id ?? "")} — ${String(page.title ?? "")}`];
+  const docset = String(page.docsetTitle ?? page.docsetId ?? "");
+  const lines = [`# ${String(page.id ?? "")} — ${String(page.title ?? "")}${docset ? ` [${docset}]` : ""}`];
   if (page.summary) lines.push(`Summary: ${String(page.summary)}`);
   for (const section of sections) {
     lines.push(`\n## ${String(section.headingPath ?? "")}`);
@@ -315,11 +318,14 @@ function defaultDbDir(version: string): string {
   return path.join(os.homedir(), ".pi", "unity-docs", version);
 }
 
-function buildCommonDbArgs(params: { db?: string; dbDir?: string; version?: string }): string[] {
+function buildCommonDbArgs(params: { db?: string; dbDir?: string; version?: string; profile?: string; docset?: string; docsets?: string[] | string }): string[] {
   const args: string[] = [];
   if (params.db) args.push("--db", params.db);
   if (params.dbDir) args.push("--db-dir", params.dbDir);
   if (params.version) args.push("--version", params.version);
+  if (params.profile) args.push("--profile", params.profile);
+  if (params.docset) args.push("--docset", params.docset);
+  if (params.docsets) args.push("--docsets", Array.isArray(params.docsets) ? params.docsets.join(",") : params.docsets);
   return args;
 }
 
@@ -389,6 +395,8 @@ export default function (pi: ExtensionAPI) {
       db: Type.Optional(Type.String({ description: "Explicit SQLite database path." })),
       dbDir: Type.Optional(Type.String({ description: "Directory containing unity_docs.sqlite." })),
       version: Type.Optional(Type.String({ description: "Unity version label from config." })),
+      profile: Type.Optional(Type.String({ description: "Documentation profile from config." })),
+      docset: Type.Optional(Type.String({ description: "Documentation docset id from config." })),
     }),
     renderCall(args, theme, context) {
       return renderReadStyleCall("unity docs info", args.version ?? args.dbDir ?? args.db ?? "configured database", theme, context);
@@ -419,10 +427,13 @@ export default function (pi: ExtensionAPI) {
     parameters: Type.Object({
       query: Type.String({ description: "Search terms, for example 'Physics.Raycast layerMask trigger'." }),
       limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50, default: 8 })),
-      corpus: Type.Optional(Type.Union([Type.Literal("Manual"), Type.Literal("ScriptReference")], { description: "Optional corpus filter." })),
+      corpus: Type.Optional(Type.Union([Type.Literal("Manual"), Type.Literal("ScriptReference"), Type.Literal("Package")], { description: "Optional corpus filter." })),
       db: Type.Optional(Type.String({ description: "Explicit SQLite database path." })),
       dbDir: Type.Optional(Type.String({ description: "Directory containing unity_docs.sqlite." })),
       version: Type.Optional(Type.String({ description: "Unity version label from config." })),
+      profile: Type.Optional(Type.String({ description: "Documentation profile from config." })),
+      docset: Type.Optional(Type.String({ description: "Documentation docset id from config." })),
+      docsets: Type.Optional(Type.Array(Type.String(), { description: "Documentation docset ids from config." })),
     }),
     renderCall(args, theme, context) {
       return renderReadStyleCall("unity docs search", args.query, theme, context);
@@ -454,6 +465,9 @@ export default function (pi: ExtensionAPI) {
       db: Type.Optional(Type.String({ description: "Explicit SQLite database path." })),
       dbDir: Type.Optional(Type.String({ description: "Directory containing unity_docs.sqlite." })),
       version: Type.Optional(Type.String({ description: "Unity version label from config." })),
+      profile: Type.Optional(Type.String({ description: "Documentation profile from config." })),
+      docset: Type.Optional(Type.String({ description: "Documentation docset id from config." })),
+      docsets: Type.Optional(Type.Array(Type.String(), { description: "Documentation docset ids from config." })),
     }),
     renderCall(args, theme, context) {
       return renderReadStyleCall("unity docs symbol", args.name, theme, context);
@@ -484,6 +498,9 @@ export default function (pi: ExtensionAPI) {
       db: Type.Optional(Type.String({ description: "Explicit SQLite database path." })),
       dbDir: Type.Optional(Type.String({ description: "Directory containing unity_docs.sqlite." })),
       version: Type.Optional(Type.String({ description: "Unity version label from config." })),
+      profile: Type.Optional(Type.String({ description: "Documentation profile from config." })),
+      docset: Type.Optional(Type.String({ description: "Documentation docset id from config." })),
+      docsets: Type.Optional(Type.Array(Type.String(), { description: "Documentation docset ids from config." })),
     }),
     renderCall(args, theme, context) {
       return renderReadStyleCall("unity docs show", args.page, theme, context);
@@ -497,6 +514,50 @@ export default function (pi: ExtensionAPI) {
       const result = await runScript(args, 120_000);
       return {
         content: [{ type: "text", text: formatShowResult(result.json) }],
+        details: result.json as object,
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "unity_docs_build_docset",
+    label: "Unity Docs Build Docset",
+    description: "Build or rebuild a local SQLite documentation cache for a Unity package Documentation~ source.",
+    promptSnippet: "Build or rebuild a package documentation docset from Documentation~.",
+    promptGuidelines: ["Use unity_docs_build_docset only when the user explicitly asks to build or rebuild package/plugin documentation."],
+    parameters: Type.Object({
+      docsetId: Type.Optional(Type.String({ description: "Docset id to register. Defaults to packageName." })),
+      sourcePath: Type.Optional(Type.String({ description: "Package Documentation~ source directory, or package root containing Documentation~." })),
+      projectPath: Type.Optional(Type.String({ description: "Unity project path used to resolve Packages or Library/PackageCache." })),
+      packageName: Type.Optional(Type.String({ description: "Unity package name to resolve from a project or record in metadata." })),
+      packageVersion: Type.Optional(Type.String({ description: "Optional package version to resolve from PackageCache or record in metadata." })),
+      title: Type.Optional(Type.String({ description: "Human-readable docset title." })),
+      dbDir: Type.String({ description: "Directory where unity_docs.sqlite should be installed." }),
+      force: Type.Optional(Type.Boolean({ default: false, description: "Replace an existing database." })),
+      limit: Type.Optional(Type.Integer({ minimum: 1, description: "Debug/testing: process only this many Markdown pages." })),
+    }),
+    renderCall(args, theme, context) {
+      return renderReadStyleCall("unity docs build docset", args.docsetId ?? args.packageName ?? args.sourcePath ?? args.projectPath, theme, context);
+    },
+    renderResult(result, options, theme, context) {
+      return renderReadStyleResult("build", result, options, theme, context);
+    },
+    async execute(_toolCallId, params, _signal, onUpdate) {
+      const args = ["--json", "build-docset", "--db-dir", params.dbDir, "--progress"];
+      if (params.docsetId) args.push("--docset-id", params.docsetId);
+      if (params.sourcePath) args.push("--source", params.sourcePath);
+      if (params.projectPath) args.push("--project", params.projectPath);
+      if (params.packageName) args.push("--package-name", params.packageName);
+      if (params.packageVersion) args.push("--package-version", params.packageVersion);
+      if (params.title) args.push("--title", params.title);
+      if (params.force) args.push("--force");
+      if (params.limit) args.push("--limit", String(params.limit));
+      onUpdate?.({ content: [{ type: "text", text: "Building Unity package documentation docset..." }] });
+      const result = await runScript(args, 3_600_000, (message) => {
+        onUpdate?.({ content: [{ type: "text", text: message }] });
+      });
+      return {
+        content: [{ type: "text", text: `Unity package documentation docset build complete.\n${JSON.stringify(result.json, null, 2)}` }],
         details: result.json as object,
       };
     },

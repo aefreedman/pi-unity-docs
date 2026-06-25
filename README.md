@@ -10,6 +10,8 @@ C:\Program Files\Unity\Hub\Editor\6000.4.7f1\Editor\Data\Documentation\en
 
 It does not copy raw HTML and does not generate Markdown/JSONL. The Unity install remains the source of truth; the generated database is a rebuildable cache.
 
+The package can also build separate package/plugin documentation docsets from Unity package `Documentation~` folders. Package docsets are managed separately from the core Unity docs cache and can be searched alongside it.
+
 ## Install in pi
 
 From this checkout:
@@ -70,7 +72,8 @@ The generated database is named `unity_docs.sqlite` inside the selected database
 - `unity_docs_search` — full-text search over section-level Unity docs.
 - `unity_docs_symbol` — exact/near-exact API symbol lookup.
 - `unity_docs_show` — retrieve compact page sections.
-- `unity_docs_build_database` — build/rebuild the cache when explicitly requested.
+- `unity_docs_build_database` — build/rebuild the core Unity docs cache when explicitly requested.
+- `unity_docs_build_docset` — build/rebuild a package/plugin `Documentation~` docset when explicitly requested.
 
 ## Direct CLI usage
 
@@ -81,6 +84,28 @@ python scripts/unity_docs_db.py search "Physics.Raycast layerMask trigger" --lim
 python scripts/unity_docs_db.py symbol "UnityEngine.Physics.Raycast"
 python scripts/unity_docs_db.py show "ScriptReference/Physics.Raycast" --sections Declaration,Parameters,Returns,Description --max-chars 6000
 ```
+
+Build a package docset from an explicit package docs source:
+
+```bash
+python scripts/unity_docs_db.py build-docset \
+  --source "<package-root-or-Documentation~>" \
+  --db-dir "<docset-db-dir>" \
+  --docset-id "<docset-id>" \
+  --force
+```
+
+Build a package docset from a Unity project's embedded packages or package cache:
+
+```bash
+python scripts/unity_docs_db.py build-docset \
+  --project "<unity-project-path>" \
+  --package-name "<package-name>" \
+  --db-dir "<docset-db-dir>" \
+  --force
+```
+
+For project package resolution, embedded packages are checked before `Library/PackageCache`. If `Packages/packages-lock.json` contains a resolved version, that version is preferred before falling back to matching package-cache folders.
 
 Add `--json` to query commands for machine-readable output. Build progress is emitted to stderr with `--progress`, so JSON stdout remains parseable.
 
