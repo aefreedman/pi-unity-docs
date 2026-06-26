@@ -64,6 +64,7 @@ def main():
         assert search, "expected search results"
         assert search[0]["docsetId"] == "example-input"
         assert search[0]["docsetKind"] == "package"
+        assert "exactScore" in search[0]
 
         shown = run(["show", "Package/Actions", "--db-dir", str(db_dir)], home)
         assert shown["page"]["title"] == "Input Actions"
@@ -90,6 +91,36 @@ def main():
         info = run(["info"], home)
         assert info["docsets"]["com.example.cache"]["sourceExists"] is True
         assert info["docsets"]["com.example.cache"]["dbExists"] is True
+
+        html_source = tmp_path / "docs.html"
+        html_source.write_text("<h1>HTML Docs</h1><h2>Tweening</h2><p>DOMove and SetEase examples.</p>", encoding="utf-8")
+        xml_source = tmp_path / "Api.xml"
+        xml_source.write_text("""<?xml version=\"1.0\"?>
+<doc><members>
+  <member name=\"T:Example.TweenApi\"><summary>Example tween API.</summary></member>
+  <member name=\"M:Example.TweenApi.DOMove(System.Single)\"><summary>Moves a target.</summary><param name=\"duration\">Duration in seconds.</param></member>
+</members></doc>
+""", encoding="utf-8")
+        staged_db_dir = tmp_path / "db-staged"
+        staged = run([
+            "build-docset",
+            "--docset-id", "staged-docs",
+            "--package-name", "com.example.staged",
+            "--html-url", html_source.as_uri(),
+            "--html-split-level", "2",
+            "--xml-doc", str(xml_source),
+            "--db-dir", str(staged_db_dir),
+            "--force",
+        ], home)
+        assert staged["docsetId"] == "staged-docs"
+        staged_search = run(["search", "DOMove SetEase", "--db-dir", str(staged_db_dir), "--limit", "5"], home)
+        assert staged_search and staged_search[0].get("sourceUrl") == html_source.as_uri()
+        staged_symbol = run(["symbol", "DOMove", "--db-dir", str(staged_db_dir), "--limit", "5"], home)
+        assert staged_symbol and "DOMove" in staged_symbol[0]["fullName"]
+        assert staged_symbol[0].get("sourceUrl") == xml_source.resolve().as_uri()
+
+        validation = run(["validate", "--docset", "example-input", "--limit", "5"], home)
+        assert validation["total"] == 0 or validation["failed"] == 0
 
     print("PASS: package docsets tests succeeded")
 

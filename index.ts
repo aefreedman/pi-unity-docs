@@ -520,6 +520,40 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerTool({
+    name: "unity_docs_validate",
+    label: "Unity Docs Validate",
+    description: "Run representative validation queries against configured Unity documentation docsets.",
+    promptSnippet: "Validate configured Unity documentation docsets with representative searches.",
+    parameters: Type.Object({
+      db: Type.Optional(Type.String({ description: "Explicit SQLite database path." })),
+      dbDir: Type.Optional(Type.String({ description: "Directory containing unity_docs.sqlite." })),
+      version: Type.Optional(Type.String({ description: "Unity version label from config." })),
+      profile: Type.Optional(Type.String({ description: "Documentation profile from config." })),
+      docset: Type.Optional(Type.String({ description: "Documentation docset id from config." })),
+      docsets: Type.Optional(Type.Array(Type.String(), { description: "Documentation docset ids from config." })),
+      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 20, description: "Maximum results per validation query." })),
+    }),
+    renderCall(args, theme, context) {
+      return renderReadStyleCall("unity docs validate", args.docset ?? args.profile ?? "configured docsets", theme, context);
+    },
+    renderResult(result, _options, theme, context) {
+      const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+      const details = asRecord(result.details);
+      const summary = details ? `${details.passed ?? 0}/${details.total ?? 0} checks passed` : getTextOutput(result);
+      text.setText(theme.fg("toolOutput", summary));
+      return text;
+    },
+    async execute(_toolCallId, params) {
+      const args = ["--json", "validate", "--limit", String(params.limit ?? 5), ...buildCommonDbArgs(params)];
+      const result = await runScript(args, 300_000);
+      return {
+        content: [{ type: "text", text: `Unity docs validation complete.\n${JSON.stringify(result.json, null, 2)}` }],
+        details: result.json as object,
+      };
+    },
+  });
+
+  pi.registerTool({
     name: "unity_docs_build_docset",
     label: "Unity Docs Build Docset",
     description: "Build or rebuild a local SQLite documentation cache for a Unity package Documentation~ source.",
@@ -532,9 +566,14 @@ export default function (pi: ExtensionAPI) {
       packageName: Type.Optional(Type.String({ description: "Unity package name to resolve from a project or record in metadata." })),
       packageVersion: Type.Optional(Type.String({ description: "Optional package version to resolve from PackageCache or record in metadata." })),
       title: Type.Optional(Type.String({ description: "Human-readable docset title." })),
+      gitbookLlmsUrl: Type.Optional(Type.String({ description: "GitBook llms.txt URL to mirror into a temporary Markdown source before building." })),
+      gitbookSection: Type.Optional(Type.String({ description: "Optional GitBook llms.txt section heading to mirror." })),
+      htmlUrls: Type.Optional(Type.Array(Type.String(), { description: "Public HTML documentation URLs to convert to Markdown before building." })),
+      htmlSplitLevel: Type.Optional(Type.Integer({ minimum: 1, maximum: 6, description: "Split converted HTML pages into Markdown pages at this heading level." })),
+      xmlDocs: Type.Optional(Type.Array(Type.String(), { description: "C# XML documentation files to convert to Markdown API pages before building." })),
       dbDir: Type.String({ description: "Directory where unity_docs.sqlite should be installed." }),
       force: Type.Optional(Type.Boolean({ default: false, description: "Replace an existing database." })),
-      limit: Type.Optional(Type.Integer({ minimum: 1, description: "Debug/testing: process only this many Markdown pages." })),
+      limit: Type.Optional(Type.Integer({ minimum: 1, description: "Debug/testing: process only this many Markdown or mirrored pages." })),
     }),
     renderCall(args, theme, context) {
       return renderReadStyleCall("unity docs build docset", args.docsetId ?? args.packageName ?? args.sourcePath ?? args.projectPath, theme, context);
@@ -550,6 +589,11 @@ export default function (pi: ExtensionAPI) {
       if (params.packageName) args.push("--package-name", params.packageName);
       if (params.packageVersion) args.push("--package-version", params.packageVersion);
       if (params.title) args.push("--title", params.title);
+      if (params.gitbookLlmsUrl) args.push("--gitbook-llms-url", params.gitbookLlmsUrl);
+      if (params.gitbookSection) args.push("--gitbook-section", params.gitbookSection);
+      for (const url of params.htmlUrls ?? []) args.push("--html-url", url);
+      if (params.htmlSplitLevel) args.push("--html-split-level", String(params.htmlSplitLevel));
+      for (const xmlDoc of params.xmlDocs ?? []) args.push("--xml-doc", xmlDoc);
       if (params.force) args.push("--force");
       if (params.limit) args.push("--limit", String(params.limit));
       onUpdate?.({ content: [{ type: "text", text: "Building Unity package documentation docset..." }] });

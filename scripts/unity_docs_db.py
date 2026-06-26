@@ -17,6 +17,8 @@ import sqlite3
 import sys
 import tempfile
 import time
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
@@ -69,6 +71,96 @@ class SectionCandidate:
     @property
     def total_chars(self) -> int:
         return sum(len(section.text) for section in self.sections)
+
+
+class GenericHtmlMarkdownParser(HTMLParser):
+    """Best-effort stdlib HTML-to-Markdown converter for package doc staging."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.out: list[str] = []
+        self.skip_depth = 0
+        self.pre_depth = 0
+        self.code_depth = 0
+
+    def append(self, value: str) -> None:
+        if not self.skip_depth:
+            self.out.append(value)
+
+    def blank(self) -> None:
+        self.append("\n\n")
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.lower()
+        if tag in {"script", "style", "svg", "noscript", "iframe", "canvas"}:
+            self.skip_depth += 1
+            return
+        if self.skip_depth:
+            return
+        if re.fullmatch(r"h[1-6]", tag):
+            self.append("\n\n" + "#" * int(tag[1]) + " ")
+        elif tag in {"p", "div", "section", "article", "main", "header", "footer", "nav", "aside", "table", "blockquote"}:
+            self.blank()
+        elif tag == "br":
+            self.append("\n")
+        elif tag == "li":
+            self.append("\n- ")
+        elif tag in {"ul", "ol"}:
+            self.blank()
+        elif tag == "tr":
+            self.append("\n")
+        elif tag in {"td", "th"}:
+            self.append(" | ")
+        elif tag == "pre":
+            self.pre_depth += 1
+            self.append("\n\n```\n")
+        elif tag == "code" and not self.pre_depth:
+            self.code_depth += 1
+            self.append("`")
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag in {"script", "style", "svg", "noscript", "iframe", "canvas"}:
+            if self.skip_depth:
+                self.skip_depth -= 1
+            return
+        if self.skip_depth:
+            return
+        if re.fullmatch(r"h[1-6]", tag):
+            self.blank()
+        elif tag in {"p", "div", "section", "article", "main", "header", "footer", "nav", "aside", "blockquote"}:
+            self.blank()
+        elif tag == "li":
+            self.append("\n")
+        elif tag == "pre":
+            if self.pre_depth:
+                self.pre_depth -= 1
+            self.append("\n```\n\n")
+        elif tag == "code" and self.code_depth and not self.pre_depth:
+            self.code_depth -= 1
+            self.append("`")
+
+    def handle_data(self, data: str) -> None:
+        if self.skip_depth:
+            return
+        if self.pre_depth:
+            self.append(data)
+            return
+        text = re.sub(r"\s+", " ", html.unescape(data))
+        if text.strip():
+            self.append(text)
+        elif self.out and not self.out[-1].endswith((" ", "\n")):
+            self.append(" ")
+
+    def markdown(self) -> str:
+        text = "".join(self.out)
+        text = re.sub(r"[ \t]+\n", "\n", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        text = re.sub(r"\n\s+-\s+", "\n- ", text)
+        text = text.strip()
+        if not re.search(r"(?m)^#\s+", text):
+            text = "# Documentation\n\n" + text
+        return text + "\n"
 
 
 class UnitySectionParser(HTMLParser):
@@ -421,6 +513,114 @@ def validate_package_source(source: Path) -> None:
         raise SystemExit(f"Package documentation source contains no Markdown files: {source}")
 
 
+def fetch_text_url(url: str) -> str:
+    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (pi-unity-docs)"})
+    with urllib.request.urlopen(request, timeout=45) as response:
+        return response.read().decode("utf-8", errors="replace")
+
+
+def safe_slug(value: str) -> str:
+    value = re.sub(r"[^A-Za-z0-9_.-]+", "-", value.strip()).strip("-.")
+    return value[:180] or "page"
+
+
+def markdown_source_url(raw_lines: list[str], frontmatter: dict[str, str]) -> str | None:
+    for key in ["sourceUrl", "source_url", "source", "url"]:
+        if frontmatter.get(key):
+            return frontmatter[key]
+    for line in raw_lines[:8]:
+        match = re.search(r"<!--\s*Source:\s*(.*?)\s*-->", line, flags=re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+        match = re.search(r"available as \[Markdown\]\((https?://[^)]+)\)", line, flags=re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+    return None
+
+
+def html_to_markdown(source_url: str, raw_html: str, title: str | None = None) -> str:
+    parser = GenericHtmlMarkdownParser()
+    parser.feed(raw_html)
+    body = parser.markdown()
+    if title and not body.startswith("# "):
+        body = f"# {title}\n\n{body}"
+    return f"<!-- Source: {source_url} -->\n\n{body}"
+
+
+def split_markdown_by_heading(markdown: str, split_level: int) -> list[tuple[str, str]]:
+    lines = markdown.splitlines()
+    source_comment = ""
+    if lines and lines[0].startswith("<!-- Source:"):
+        source_comment = lines[0] + "\n\n"
+        lines = lines[1:]
+    starts: list[tuple[int, str]] = []
+    for index, line in enumerate(lines):
+        match = re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
+        if match and len(match.group(1)) == split_level:
+            heading = clean_markdown_text(match.group(2)) or f"Section {len(starts) + 1}"
+            starts.append((index, heading))
+    if len(starts) <= 1:
+        title = starts[0][1] if starts else "Documentation"
+        return [(safe_slug(title).lower(), source_comment + "\n".join(lines).strip() + "\n")]
+    chunks: list[tuple[str, str]] = []
+    for i, (start, heading) in enumerate(starts):
+        end = starts[i + 1][0] if i + 1 < len(starts) else len(lines)
+        chunk_lines = list(lines[start:end])
+        chunk_lines[0] = "# " + heading
+        chunks.append((f"{i + 1:02d}-{safe_slug(heading).lower()}", source_comment + "\n".join(chunk_lines).strip() + "\n"))
+    return chunks
+
+
+def stage_gitbook_llms(llms_url: str, section: str | None, docs_dir: Path, limit: int | None = None) -> int:
+    llms = fetch_text_url(llms_url)
+    content = llms
+    if section:
+        pattern = rf"(?ms)^##\s+{re.escape(section)}\s*(.*?)(?=^##\s+|\Z)"
+        match = re.search(pattern, llms)
+        if not match:
+            raise SystemExit(f"Could not find GitBook llms.txt section: {section}")
+        content = match.group(1)
+    urls: list[str] = []
+    seen: set[str] = set()
+    for url in re.findall(r"https?://[^)\s]+?\.md", content):
+        url = url.rstrip("\\")
+        if url not in seen:
+            seen.add(url)
+            urls.append(url)
+    if limit is not None:
+        urls = urls[:limit]
+    base_path = urllib.parse.urlparse(llms_url).path.rsplit("/", 1)[0].strip("/")
+    for url in urls:
+        parsed = urllib.parse.urlparse(url)
+        rel = parsed.path.strip("/")
+        if base_path and rel.startswith(base_path + "/"):
+            rel = rel[len(base_path) + 1:]
+        target = docs_dir / urllib.parse.unquote(rel)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        text = fetch_text_url(url)
+        text = re.split(r"(?m)^---\s*\n\s*# Agent Instructions\s*$", text, maxsplit=1)[0].rstrip() + "\n"
+        target.write_text(text, encoding="utf-8")
+    return len(urls)
+
+
+def stage_html_urls(urls: list[str], docs_dir: Path, split_level: int = 0, limit: int | None = None) -> int:
+    count = 0
+    for url in urls[:limit] if limit is not None else urls:
+        raw = fetch_text_url(url)
+        markdown = html_to_markdown(url, raw)
+        if split_level:
+            chunks = split_markdown_by_heading(markdown, split_level)
+        else:
+            slug = safe_slug(urllib.parse.urlparse(url).path.strip("/") or "index").lower()
+            chunks = [(slug, markdown)]
+        for slug, text in chunks:
+            target = docs_dir / f"{slug}.md"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text, encoding="utf-8")
+            count += 1
+    return count
+
+
 def find_package_root(docs_source: Path) -> Path:
     if docs_source.name == "Documentation~":
         return docs_source.parent
@@ -548,9 +748,10 @@ def clean_markdown_text(value: str) -> str:
     return normalize_space(value)
 
 
-def parse_markdown_sections(path: Path) -> tuple[str, str | None, list[ParsedSection]]:
+def parse_markdown_sections(path: Path) -> tuple[str, str | None, str | None, list[ParsedSection]]:
     raw_lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     frontmatter, lines = parse_frontmatter(raw_lines)
+    source_url = markdown_source_url(raw_lines, frontmatter)
     title = ""
     sections: list[ParsedSection] = []
     heading_stack: dict[int, str] = {}
@@ -592,7 +793,132 @@ def parse_markdown_sections(path: Path) -> tuple[str, str | None, list[ParsedSec
 
     if not title:
         title = clean_markdown_text(path.stem.replace("-", " ").replace("_", " ")) or path.stem
-    return title, frontmatter.get("uid"), sections
+    return title, frontmatter.get("uid"), source_url, sections
+
+
+def xml_element_to_text(element: Any) -> str:
+    if element is None:
+        return ""
+    pieces: list[str] = []
+
+    def walk(node: Any) -> None:
+        if node.text:
+            pieces.append(node.text)
+        for child in node:
+            tag = str(child.tag).lower()
+            if tag in {"para", "br"}:
+                pieces.append("\n")
+            elif tag == "see":
+                pieces.append(child.attrib.get("cref") or child.attrib.get("langword") or child.attrib.get("href") or "")
+            elif tag == "paramref":
+                pieces.append(child.attrib.get("name", ""))
+            elif tag == "c":
+                pieces.append("`")
+                if child.text:
+                    pieces.append(child.text)
+                pieces.append("`")
+            elif tag == "code":
+                pieces.append("\n```csharp\n")
+                if child.text:
+                    pieces.append(child.text)
+                pieces.append("\n```\n")
+            else:
+                walk(child)
+            if child.tail:
+                pieces.append(child.tail)
+
+    walk(element)
+    text = html.unescape("".join(pieces))
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def xml_member_declaring_type(member_name: str) -> str:
+    full = member_name[2:]
+    base = full.split("(", 1)[0]
+    if member_name.startswith("T:"):
+        return base
+    if ".#ctor" in base:
+        return base.split(".#ctor", 1)[0]
+    if ".#cctor" in base:
+        return base.split(".#cctor", 1)[0]
+    return base.rsplit(".", 1)[0] if "." in base else base
+
+
+def xml_member_short_name(member_name: str) -> str:
+    full = member_name[2:]
+    base = full.split("(", 1)[0]
+    if ".#ctor" in base:
+        return base.rsplit(".", 1)[0].split(".")[-1]
+    return base.rsplit(".", 1)[-1]
+
+
+def stage_xml_docs(xml_sources: list[Path], docs_dir: Path) -> int:
+    import xml.etree.ElementTree as ET
+
+    api_dir = docs_dir / "api"
+    api_dir.mkdir(parents=True, exist_ok=True)
+    type_docs: dict[str, dict[str, Any]] = {}
+    for xml_path in xml_sources:
+        if not xml_path.exists():
+            raise SystemExit(f"XML documentation file does not exist: {xml_path}")
+        try:
+            root = ET.parse(xml_path).getroot()
+        except ET.ParseError as exc:
+            raise SystemExit(f"Could not parse XML documentation file {xml_path}: {exc}") from exc
+        members = root.find("members")
+        if members is None:
+            continue
+        for member in members.findall("member"):
+            name = member.attrib.get("name", "")
+            if len(name) < 3 or name[1] != ":":
+                continue
+            declaring = xml_member_declaring_type(name)
+            info = type_docs.setdefault(declaring, {"summary": "", "members": [], "sources": set()})
+            info["sources"].add(str(xml_path))
+            summary = xml_element_to_text(member.find("summary"))
+            if name.startswith("T:"):
+                info["summary"] = summary
+                continue
+            info["members"].append({
+                "kind": name[0],
+                "name": name,
+                "short": xml_member_short_name(name),
+                "summary": summary,
+                "remarks": xml_element_to_text(member.find("remarks")),
+                "returns": xml_element_to_text(member.find("returns")),
+                "params": [(param.attrib.get("name", ""), xml_element_to_text(param)) for param in member.findall("param")],
+                "source": str(xml_path),
+            })
+    count = 0
+    for declaring, info in sorted(type_docs.items()):
+        members = info.get("members") or []
+        if not info.get("summary") and not members:
+            continue
+        sources = sorted(str(source) for source in info.get("sources", []))
+        source_comment = f"<!-- Source: {Path(sources[0]).resolve().as_uri()} -->\n\n" if sources else ""
+        lines = [f"# {declaring}", "", "Source: local XML documentation.", ""]
+        if info.get("summary"):
+            lines += [str(info["summary"]), ""]
+        for member in sorted(members, key=lambda item: (item["short"], item["name"])):
+            kind_label = {"M": "Method", "P": "Property", "F": "Field", "E": "Event"}.get(member["kind"], member["kind"])
+            lines += [f"## {kind_label} {member['short']}", "", f"`{member['name']}`", ""]
+            if member.get("summary"):
+                lines += [member["summary"], ""]
+            if member.get("params"):
+                lines.append("Parameters:")
+                for param_name, param_text in member["params"]:
+                    lines.append(f"- `{param_name}`: {param_text}")
+                lines.append("")
+            if member.get("returns"):
+                lines += ["Returns:", member["returns"], ""]
+            if member.get("remarks"):
+                lines += ["Remarks:", member["remarks"], ""]
+        target = api_dir / f"{safe_slug(declaring).lower()}.md"
+        target.write_text(source_comment + "\n".join(lines).strip() + "\n", encoding="utf-8")
+        count += 1
+    return count
 
 
 def infer_kind(corpus: str, slug: str, title: str, sections: list[ParsedSection]) -> str:
@@ -659,6 +985,7 @@ def create_schema(conn: sqlite3.Connection) -> None:
           kind TEXT NOT NULL,
           uid TEXT,
           source_path TEXT NOT NULL,
+          source_url TEXT,
           url_path TEXT NOT NULL,
           breadcrumbs TEXT,
           summary TEXT
@@ -778,8 +1105,8 @@ def build_database(source: Path, db_path: Path, version: str, force: bool = Fals
                 signature = extract_signature(sections)
 
                 conn.execute(
-                    "INSERT INTO pages(id, version, corpus, slug, title, kind, uid, source_path, url_path, breadcrumbs, summary) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (page_id, version, corpus, slug, title, kind, uid, str(html_path), f"{corpus}/{rel}", breadcrumbs, summary),
+                    "INSERT INTO pages(id, version, corpus, slug, title, kind, uid, source_path, source_url, url_path, breadcrumbs, summary) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (page_id, version, corpus, slug, title, kind, uid, str(html_path), None, f"{corpus}/{rel}", breadcrumbs, summary),
                 )
                 counts["pages"] += 1
                 emit_progress(f"processing {corpus}", corpus)
@@ -923,11 +1250,11 @@ def build_package_docset(
             rel = md_path.relative_to(source).as_posix()
             slug = rel.rsplit(".", 1)[0]
             page_id = f"Package/{slug}"
-            page_title, uid, sections = parse_markdown_sections(md_path)
+            page_title, uid, source_url, sections = parse_markdown_sections(md_path)
             summary = sections[0].text[:500] if sections else ""
             conn.execute(
-                "INSERT INTO pages(id, version, corpus, slug, title, kind, uid, source_path, url_path, breadcrumbs, summary) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (page_id, package_version, "Package", slug, page_title, "package_page", uid, str(md_path), f"Package/{rel}", title, summary),
+                "INSERT INTO pages(id, version, corpus, slug, title, kind, uid, source_path, source_url, url_path, breadcrumbs, summary) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (page_id, package_version, "Package", slug, page_title, "package_page", uid, str(md_path), source_url, f"Package/{rel}", title, summary),
             )
             counts["pages"] += 1
             emit_progress("processing Package")
@@ -1025,7 +1352,18 @@ def fts_query(query: str) -> str:
 
 
 def row_dict(row: sqlite3.Row) -> dict[str, Any]:
-    return {key: row[key] for key in row.keys()}
+    data = {key: row[key] for key in row.keys()}
+    if "source_url" in data and data.get("source_url") is not None and "sourceUrl" not in data:
+        data["sourceUrl"] = data.get("source_url")
+    return data
+
+
+def table_has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    return any(row[1] == column for row in conn.execute(f"PRAGMA table_info({table})"))
+
+
+def page_source_url_select(conn: sqlite3.Connection, alias: str = "p") -> str:
+    return f"{alias}.source_url AS sourceUrl" if table_has_column(conn, "pages", "source_url") else "NULL AS sourceUrl"
 
 
 def read_db_metadata(db_path: Path) -> dict[str, str]:
@@ -1132,6 +1470,7 @@ def resolve_query_docsets(args: argparse.Namespace) -> list[tuple[str, Path, dic
             "packageName": raw.get("packageName"),
             "packageVersion": raw.get("packageVersion"),
             "priority": raw.get("priority", 0),
+            "validationQueries": raw.get("validationQueries"),
         }
         resolved.append((docset_id, db_path, docset))
     if not resolved:
@@ -1142,22 +1481,33 @@ def resolve_query_docsets(args: argparse.Namespace) -> list[tuple[str, Path, dic
 def search_db(db_path: Path, query: str, limit: int, corpus: str | None = None, docset: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     conn = ensure_db(db_path)
     match = fts_query(query)
-    params: list[Any] = [match]
     corpus_sql = ""
+    query_lower = normalize_space(query).lower()
+    like_query = f"%{query_lower}%"
+    source_url_sql = page_source_url_select(conn, "p")
+    params: list[Any] = [query_lower, like_query, query_lower, like_query, like_query, match]
     if corpus:
         corpus_sql = " AND p.corpus = ?"
         params.append(corpus)
     params.append(limit)
     sql = f"""
         SELECT s.id AS sectionId, s.page_id AS pageId, p.title, p.corpus, p.kind, p.slug,
-               p.breadcrumbs, s.heading_path AS headingPath,
+               p.breadcrumbs, {source_url_sql}, s.heading_path AS headingPath,
                snippet(sections_fts, 4, '[', ']', ' … ', 24) AS snippet,
-               bm25(sections_fts) AS rank
+               bm25(sections_fts) AS rank,
+               CASE
+                 WHEN lower(p.title) = ? THEN 100
+                 WHEN lower(p.title) LIKE ? THEN 80
+                 WHEN lower(s.heading_path) = ? THEN 70
+                 WHEN lower(s.heading_path) LIKE ? THEN 55
+                 WHEN lower(p.slug) LIKE ? THEN 40
+                 ELSE 0
+               END AS exactScore
         FROM sections_fts
         JOIN sections s ON s.id = sections_fts.section_id
         JOIN pages p ON p.id = s.page_id
         WHERE sections_fts MATCH ? {corpus_sql}
-        ORDER BY rank
+        ORDER BY exactScore DESC, rank
         LIMIT ?
     """
     try:
@@ -1178,7 +1528,7 @@ def search_docsets(args: argparse.Namespace) -> list[dict[str, Any]]:
         for row in search_db(db_path, args.query, per_docset_limit, args.corpus, docset):
             row["docsetPriority"] = docset.get("priority", 0)
             merged.append(row)
-    merged.sort(key=lambda row: (-int(row.get("docsetPriority") or 0), float(row.get("rank") or 0)))
+    merged.sort(key=lambda row: (-int(row.get("exactScore") or 0), -int(row.get("docsetPriority") or 0), float(row.get("rank") or 0)))
     return merged[:args.limit]
 
 
@@ -1197,7 +1547,7 @@ def symbol_db(db_path: Path, name: str, limit: int, docset: dict[str, Any] | Non
         for row in conn.execute(
             f"""
             SELECT sym.full_name AS fullName, sym.short_name AS shortName, sym.uid, sym.kind, sym.signature,
-                   p.id AS pageId, p.title, p.corpus, p.slug, p.summary
+                   p.id AS pageId, p.title, p.corpus, p.slug, p.summary, {page_source_url_select(conn, "p")}
             FROM symbols sym
             JOIN pages p ON p.id = sym.page_id
             WHERE {where_sql}
@@ -1218,8 +1568,9 @@ def symbol_db(db_path: Path, name: str, limit: int, docset: dict[str, Any] | Non
     def append_page_rows(title: str) -> None:
         if len(rows) >= limit:
             return
+        source_url_sql = page_source_url_select(conn, "pages")
         for row in conn.execute(
-            "SELECT id AS pageId, title, corpus, slug, kind, uid, summary FROM pages WHERE title = ? LIMIT ?",
+            f"SELECT id AS pageId, title, corpus, slug, kind, uid, summary, {source_url_sql} FROM pages WHERE title = ? LIMIT ?",
             (title, limit),
         ):
             page = row_dict(row)
@@ -1483,32 +1834,181 @@ def cmd_show(args: argparse.Namespace) -> None:
         print("\n[truncated]")
 
 
+DEFAULT_VALIDATION_QUERIES: dict[str, list[dict[str, Any]]] = {
+    "unity": [
+        {"kind": "symbol", "query": "UnityEngine.Physics.Raycast", "expect": ["Physics.Raycast"]},
+        {"kind": "search", "query": "Input.GetKeyDown", "expect": ["Input"]},
+    ],
+    "input-system": [
+        {"kind": "search", "query": "PlayerInput input actions", "expect": ["PlayerInput"]},
+        {"kind": "search", "query": "rebinding", "expect": ["rebinding"]},
+    ],
+    "unitask": [
+        {"kind": "search", "query": "UniTask async await", "expect": ["UniTask"]},
+    ],
+    "test-framework": [
+        {"kind": "search", "query": "Unity Test Framework", "expect": ["Test"]},
+    ],
+    "ui-test-framework": [
+        {"kind": "search", "query": "click visual element", "expect": ["Click"]},
+    ],
+    "text-animator": [
+        {"kind": "search", "query": "typewriter wait input", "expect": ["Wait"]},
+        {"kind": "search", "query": "Yarn Spinner", "expect": ["Yarn"]},
+    ],
+    "yarn-spinner": [
+        {"kind": "search", "query": "Unity Yarn Project", "expect": ["Yarn"]},
+        {"kind": "search", "query": "DialogueRunner command handler", "expect": ["AddCommandHandler"]},
+    ],
+    "shapes": [
+        {"kind": "search", "query": "Draw Line Vector3 start end", "expect": ["Line"]},
+        {"kind": "search", "query": "Draw Polyline path thickness", "expect": ["Polyline"]},
+    ],
+    "dotween": [
+        {"kind": "search", "query": "DOMove SetEase Sequence", "expect": ["SetEase"]},
+        {"kind": "symbol", "query": "DORotateQuaternion", "expect": ["DORotateQuaternion"]},
+    ],
+    "odin": [
+        {"kind": "symbol", "query": "ShowIfAttribute", "expect": ["ShowIfAttribute"]},
+        {"kind": "search", "query": "custom value drawer", "expect": ["Value Drawer"]},
+    ],
+}
+
+
+def validation_queries_for_docset(docset_id: str, docset: dict[str, Any]) -> list[dict[str, Any]]:
+    configured = docset.get("validationQueries")
+    if isinstance(configured, list):
+        return [item for item in configured if isinstance(item, dict) and item.get("query")]
+    if docset_id in DEFAULT_VALIDATION_QUERIES:
+        return DEFAULT_VALIDATION_QUERIES[docset_id]
+    if docset.get("docsetKind") == "unity" or docset.get("kind") == "unity":
+        return DEFAULT_VALIDATION_QUERIES["unity"]
+    return []
+
+
+def result_text_for_validation(rows: list[dict[str, Any]]) -> str:
+    parts: list[str] = []
+    for row in rows[:5]:
+        parts.extend(str(row.get(key) or "") for key in ["fullName", "shortName", "title", "pageId", "headingPath", "snippet", "summary"])
+    return "\n".join(parts).lower()
+
+
+def validate_docsets(args: argparse.Namespace) -> dict[str, Any]:
+    resolved = resolve_query_docsets(args)
+    docset_results: list[dict[str, Any]] = []
+    total = 0
+    passed = 0
+    for docset_id, db_path, docset in resolved:
+        queries = validation_queries_for_docset(docset_id, docset)
+        checks: list[dict[str, Any]] = []
+        for check in queries:
+            total += 1
+            kind = str(check.get("kind") or "search")
+            query = str(check["query"])
+            expect = [str(value).lower() for value in check.get("expect") or []]
+            if kind == "symbol":
+                rows = symbol_db(db_path, query, args.limit, docset)
+            else:
+                rows = search_db(db_path, query, args.limit, None, docset)
+            haystack = result_text_for_validation(rows)
+            ok = bool(rows) and all(expected in haystack for expected in expect)
+            if ok:
+                passed += 1
+            checks.append({
+                "kind": kind,
+                "query": query,
+                "expect": check.get("expect") or [],
+                "passed": ok,
+                "resultCount": len(rows),
+                "topResult": rows[0] if rows else None,
+            })
+        docset_results.append({
+            "docsetId": docset_id,
+            "docsetTitle": docset.get("docsetTitle"),
+            "dbPath": str(db_path),
+            "checkCount": len(checks),
+            "passed": all(check["passed"] for check in checks) if checks else None,
+            "checks": checks,
+        })
+    return {"passed": passed, "total": total, "failed": total - passed, "docsets": docset_results}
+
+
+def cmd_validate(args: argparse.Namespace) -> None:
+    print_json_or_text(validate_docsets(args), args.json)
+
+
 def cmd_info(args: argparse.Namespace) -> None:
     print_json_or_text(info_db(args), args.json)
 
 
 def cmd_build_docset(args: argparse.Namespace) -> None:
-    docs_source, source_kind, project_path = resolve_package_docs_source(args.source, args.project, args.package_name, args.package_version)
-    package_root = find_package_root(docs_source)
-    metadata = load_package_metadata(package_root)
-    package_name = args.package_name or metadata.get("name") or package_root.name.split("@")[0]
-    docset_id = sanitize_docset_id(args.docset_id or package_name)
-    db_path = resolve_db_path(args) if (args.db or args.db_dir) else db_path_from_dir(default_db_dir(docset_id))
-    result = build_package_docset(
-        docs_source,
-        db_path,
-        docset_id=docset_id,
-        title=args.title,
-        package_name=package_name,
-        package_version=args.package_version,
-        force=args.force,
-        limit=args.limit,
-        write_config=not args.no_config,
-        progress=args.progress,
-        source_kind=source_kind,
-        project_path=project_path,
-    )
-    print_json_or_text(result, args.json)
+    ingesting = bool(args.gitbook_llms_url or args.html_url or args.xml_doc)
+    temp_dir_obj: tempfile.TemporaryDirectory[str] | None = None
+    try:
+        source_label: str | None = None
+        if ingesting:
+            source_label = args.source or args.gitbook_llms_url or (args.html_url[0] if args.html_url else None) or (args.xml_doc[0] if args.xml_doc else None)
+            temp_dir_obj = tempfile.TemporaryDirectory(prefix="unity_docs_docset_stage_")
+            stage_root = Path(temp_dir_obj.name)
+            docs_source = stage_root / "Documentation~"
+            docs_source.mkdir(parents=True, exist_ok=True)
+            source_kind = "staged"
+            project_path = None
+            metadata: dict[str, Any] = {}
+            if args.source:
+                base_source, base_kind, project_path = resolve_package_docs_source(args.source, args.project, args.package_name, args.package_version)
+                source_kind = f"{base_kind}+staged"
+                package_root = find_package_root(base_source)
+                metadata = load_package_metadata(package_root)
+                shutil.copytree(base_source, docs_source, dirs_exist_ok=True)
+            if args.gitbook_llms_url:
+                stage_gitbook_llms(args.gitbook_llms_url, args.gitbook_section, docs_source, args.limit)
+            if args.html_url:
+                stage_html_urls(args.html_url, docs_source, args.html_split_level or 0, args.limit)
+            if args.xml_doc:
+                stage_xml_docs([Path(path).expanduser() for path in args.xml_doc], docs_source)
+            package_name = args.package_name or metadata.get("name") or args.docset_id or "package-docs"
+            package_version = args.package_version or metadata.get("version") or "unknown"
+            package_json = {
+                "name": package_name,
+                "displayName": args.title or metadata.get("displayName") or package_name,
+                "version": package_version,
+                "documentationUrl": args.gitbook_llms_url or (args.html_url[0] if args.html_url else metadata.get("documentationUrl")),
+            }
+            (stage_root / "package.json").write_text(json.dumps(package_json, indent=2), encoding="utf-8")
+        else:
+            docs_source, source_kind, project_path = resolve_package_docs_source(args.source, args.project, args.package_name, args.package_version)
+            package_root = find_package_root(docs_source)
+            metadata = load_package_metadata(package_root)
+            package_name = args.package_name or metadata.get("name") or package_root.name.split("@")[0]
+            package_version = args.package_version
+
+        docset_id = sanitize_docset_id(args.docset_id or package_name)
+        db_path = resolve_db_path(args) if (args.db or args.db_dir) else db_path_from_dir(default_db_dir(docset_id))
+        result = build_package_docset(
+            docs_source,
+            db_path,
+            docset_id=docset_id,
+            title=args.title,
+            package_name=package_name,
+            package_version=package_version,
+            force=args.force,
+            limit=None if ingesting else args.limit,
+            write_config=not args.no_config,
+            progress=args.progress,
+            source_kind=source_kind,
+            project_path=project_path,
+        )
+        if ingesting and not args.no_config and source_label:
+            config = load_config()
+            docset_config = (config.get("docsets") or {}).get(docset_id)
+            if isinstance(docset_config, dict):
+                docset_config["sourcePath"] = source_label
+                save_config(config)
+        print_json_or_text(result, args.json)
+    finally:
+        if temp_dir_obj is not None:
+            temp_dir_obj.cleanup()
 
 
 def add_json_flag(parser: argparse.ArgumentParser) -> None:
@@ -1554,6 +2054,11 @@ def build_parser() -> argparse.ArgumentParser:
     build_docset.add_argument("--limit", type=int, help="Debug: only process this many Markdown pages.")
     build_docset.add_argument("--no-config", action="store_true", help="Do not update ~/.pi/unity-docs/config.json after building.")
     build_docset.add_argument("--progress", action="store_true", help="Emit progress JSON lines to stderr while building.")
+    build_docset.add_argument("--gitbook-llms-url", help="GitBook llms.txt URL to mirror into a temporary Markdown docset source before building.")
+    build_docset.add_argument("--gitbook-section", help="Optional GitBook llms.txt section heading to mirror, for example '3.X (EN)'.")
+    build_docset.add_argument("--html-url", action="append", help="Public HTML documentation URL to convert to Markdown before building. May be passed multiple times.")
+    build_docset.add_argument("--html-split-level", type=int, choices=range(1, 7), metavar="1-6", help="Split converted HTML pages into Markdown pages at this heading level.")
+    build_docset.add_argument("--xml-doc", action="append", help="C# XML documentation file to convert to Markdown API pages before building. May be passed multiple times.")
     build_docset.set_defaults(func=cmd_build_docset)
 
     info = sub.add_parser("info", help="Show configuration and database status.")
@@ -1565,6 +2070,17 @@ def build_parser() -> argparse.ArgumentParser:
     info.add_argument("--docset", help="Documentation docset id to inspect.")
     info.add_argument("--discover", action="store_true", help="Include discovered Unity documentation sources.")
     info.set_defaults(func=cmd_info)
+
+    validate = sub.add_parser("validate", help="Run representative validation queries against configured docsets.")
+    add_json_flag(validate)
+    validate.add_argument("--db", help="Explicit SQLite database path.")
+    validate.add_argument("--db-dir", help="Directory containing unity_docs.sqlite.")
+    validate.add_argument("--version", help="Unity version label from config.")
+    validate.add_argument("--profile", help="Documentation profile to validate.")
+    validate.add_argument("--docset", help="Documentation docset id to validate.")
+    validate.add_argument("--docsets", help="Comma-separated documentation docset ids to validate.")
+    validate.add_argument("--limit", type=int, default=5)
+    validate.set_defaults(func=cmd_validate)
 
     search = sub.add_parser("search", help="Search section-level Unity docs.")
     add_json_flag(search)

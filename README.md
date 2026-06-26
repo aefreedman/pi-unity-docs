@@ -73,7 +73,8 @@ The generated database is named `unity_docs.sqlite` inside the selected database
 - `unity_docs_symbol` — exact/near-exact API symbol lookup.
 - `unity_docs_show` — retrieve compact page sections.
 - `unity_docs_build_database` — build/rebuild the core Unity docs cache when explicitly requested.
-- `unity_docs_build_docset` — build/rebuild a package/plugin `Documentation~` docset when explicitly requested.
+- `unity_docs_build_docset` — build/rebuild a package/plugin docset from `Documentation~`, GitBook `llms.txt`, public HTML pages, or C# XML docs when explicitly requested.
+- `unity_docs_validate` — run representative validation queries across configured docsets.
 
 ## Direct CLI usage
 
@@ -103,6 +104,33 @@ python scripts/unity_docs_db.py build-docset \
   --package-name "<package-name>" \
   --db-dir "<docset-db-dir>" \
   --force
+```
+
+Build from external documentation formats without keeping staged files in the package repo:
+
+```bash
+python scripts/unity_docs_db.py build-docset \
+  --docset-id "<docset-id>" \
+  --package-name "<package-name>" \
+  --gitbook-llms-url "<https://example.com/docs/llms.txt>" \
+  --gitbook-section "<section heading>" \
+  --db-dir "<docset-db-dir>" \
+  --force
+
+python scripts/unity_docs_db.py build-docset \
+  --docset-id "<docset-id>" \
+  --package-name "<package-name>" \
+  --html-url "<https://example.com/documentation.html>" \
+  --html-split-level 2 \
+  --xml-doc "<path-to-csharp-xml-docs>" \
+  --db-dir "<docset-db-dir>" \
+  --force
+```
+
+Run representative validation queries across configured docsets:
+
+```bash
+python scripts/unity_docs_db.py validate --json
 ```
 
 For project package resolution, embedded packages are checked before `Library/PackageCache`. If `Packages/packages-lock.json` contains a resolved version, that version is preferred before falling back to matching package-cache folders.

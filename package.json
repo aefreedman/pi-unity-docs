@@ -1,7 +1,7 @@
 {
   "name": "@aefree/pi-unity-docs",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "description": "Pi tools and skills for fast, token-efficient retrieval from local Unity documentation.",
   "keywords": [
