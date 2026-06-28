@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.0 - 2026-06-27
+
+### Changed
+
+- Improved no-result search/symbol output with configured docset hints so agents can retry package/plugin queries against explicit docsets such as `shapes`.
+
+## 0.2.1 - 2026-06-27
+
+### Changed
+
+- Clarified `using-unity-docs` package-docset guidance so agents explicitly inspect/search configured plugin docsets such as Shapes when package-specific documentation is relevant.
+
 ## 0.2.0 - 2026-06-26
 
 ### Added

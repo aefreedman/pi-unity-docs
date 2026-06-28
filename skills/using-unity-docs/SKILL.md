@@ -44,7 +44,7 @@ Status/configuration:
 unity_docs_info()
 ```
 
-Package/plugin docs configured as separate docsets are searched with the active docs profile by default. Use `docset` or `docsets` filters only when you need to narrow results or disambiguate a `unity_docs_show` call.
+Package/plugin docs configured as separate docsets are searched with the active docs profile by default. If a question mentions a package/plugin by name (for example Shapes, Odin, DOTween, Input System, UI Test Framework), call `unity_docs_info()` when you are unsure which docsets are configured, then search the relevant docset explicitly with `docset` or `docsets` if broad search results do not surface it. Use `docset`/`docsets` filters to narrow results, disambiguate a `unity_docs_show` call, or verify that a package docset such as `shapes` is actually being searched.
 
 ## Building the cache
 

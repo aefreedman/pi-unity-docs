@@ -7,6 +7,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "unity_docs_db.py"
+INDEX_TS = ROOT / "index.ts"
 
 
 def run(args, home):
@@ -47,6 +48,11 @@ Gamepad controls include sticks, buttons, and triggers.
 
 
 def main():
+    index_text = INDEX_TS.read_text(encoding="utf-8")
+    assert "formatConfiguredDocsetHint" in index_text
+    assert "Configured docsets you can target explicitly" in index_text
+    assert "buildInfoArgs" in index_text
+
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         home = tmp_path / "home"

@@ -257,8 +257,31 @@ function truncate(value: string, max = 500): string {
   return `${value.slice(0, max)}…`;
 }
 
-function formatSearchResults(results: Record<string, unknown>[]): string {
-  if (results.length === 0) return "No Unity documentation results found.";
+function formatConfiguredDocsetHint(info: unknown): string {
+  const docsets = (info as { docsets?: Record<string, { title?: string; enabled?: boolean; dbExists?: boolean }> } | undefined)?.docsets ?? {};
+  const configured = Object.entries(docsets)
+    .filter(([, docset]) => docset.enabled !== false)
+    .map(([id, docset]) => `${id}${docset.title ? ` (${docset.title})` : ""}${docset.dbExists === false ? " [missing db]" : ""}`)
+    .slice(0, 12);
+  if (configured.length === 0) return "";
+  return [
+    "",
+    "Configured docsets you can target explicitly:",
+    ...configured.map((entry) => `- ${entry}`),
+    "Tip: for package/plugin questions, retry with docset/docsets set to the relevant id (for example shapes, input-system, odin, dotween).",
+  ].join("\n");
+}
+
+async function buildNoResultDocsetHint(params: { db?: string; dbDir?: string; version?: string; profile?: string; docset?: string }): Promise<string> {
+  try {
+    return formatConfiguredDocsetHint((await runScript(["--json", "info", ...buildInfoArgs(params)], 30_000)).json);
+  } catch {
+    return "";
+  }
+}
+
+function formatSearchResults(results: Record<string, unknown>[], noResultHint = ""): string {
+  if (results.length === 0) return `No Unity documentation results found.${noResultHint}`;
   return results.map((result, index) => {
     const pageId = String(result.pageId ?? "");
     const title = String(result.title ?? "");
@@ -273,8 +296,8 @@ function formatSearchResults(results: Record<string, unknown>[]): string {
   }).join("\n");
 }
 
-function formatSymbolResults(results: Record<string, unknown>[]): string {
-  if (results.length === 0) return "No Unity API symbols found.";
+function formatSymbolResults(results: Record<string, unknown>[], noResultHint = ""): string {
+  if (results.length === 0) return `No Unity API symbols found.${noResultHint}`;
   return results.map((result, index) => {
     const fullName = String(result.fullName ?? result.title ?? "");
     const pageId = String(result.pageId ?? "");
@@ -326,6 +349,16 @@ function buildCommonDbArgs(params: { db?: string; dbDir?: string; version?: stri
   if (params.profile) args.push("--profile", params.profile);
   if (params.docset) args.push("--docset", params.docset);
   if (params.docsets) args.push("--docsets", Array.isArray(params.docsets) ? params.docsets.join(",") : params.docsets);
+  return args;
+}
+
+function buildInfoArgs(params: { db?: string; dbDir?: string; version?: string; profile?: string; docset?: string }): string[] {
+  const args: string[] = [];
+  if (params.db) args.push("--db", params.db);
+  if (params.dbDir) args.push("--db-dir", params.dbDir);
+  if (params.version) args.push("--version", params.version);
+  if (params.profile) args.push("--profile", params.profile);
+  if (params.docset) args.push("--docset", params.docset);
   return args;
 }
 
@@ -405,7 +438,7 @@ export default function (pi: ExtensionAPI) {
       return renderReadStyleResult("info", result, options, theme, context);
     },
     async execute(_toolCallId, params) {
-      const args = ["--json", "info", ...buildCommonDbArgs(params)];
+      const args = ["--json", "info", ...buildInfoArgs(params)];
       if (params.discover) args.push("--discover");
       const result = await runScript(args, 60_000);
       return {
@@ -446,9 +479,10 @@ export default function (pi: ExtensionAPI) {
       if (params.corpus) args.push("--corpus", params.corpus);
       const result = await runScript(args, 120_000);
       const rows = asArray(result.json);
+      const hint = rows.length === 0 ? await buildNoResultDocsetHint(params) : "";
       return {
-        content: [{ type: "text", text: formatSearchResults(rows) }],
-        details: { results: rows },
+        content: [{ type: "text", text: formatSearchResults(rows, hint) }],
+        details: { results: rows, noResultHint: hint || undefined },
       };
     },
   });
@@ -478,9 +512,10 @@ export default function (pi: ExtensionAPI) {
     async execute(_toolCallId, params) {
       const result = await runScript(["--json", "symbol", params.name, "--limit", String(params.limit ?? 8), ...buildCommonDbArgs(params)], 120_000);
       const rows = asArray(result.json);
+      const hint = rows.length === 0 ? await buildNoResultDocsetHint(params) : "";
       return {
-        content: [{ type: "text", text: formatSymbolResults(rows) }],
-        details: { results: rows },
+        content: [{ type: "text", text: formatSymbolResults(rows, hint) }],
+        details: { results: rows, noResultHint: hint || undefined },
       };
     },
   });
