@@ -82,6 +82,11 @@ def main():
         home.mkdir()
 
         old_source = write_unity_source(tmp_path / "unity-sources", "2022.3.18f1", "oldmarker")
+        mac_source = tmp_path / "Unity" / "Hub" / "Editor" / "6000.5.2f1" / "Unity.app" / "Contents" / "Documentation" / "en"
+        for corpus in ["Manual", "ScriptReference"]:
+            (mac_source / corpus).mkdir(parents=True)
+        inferred = run(["configure", "--source", str(mac_source), "--db-dir", str(tmp_path / "mac-db"), "--yes"], home)
+        assert inferred["version"] == "6000.5.2f1"
         line_source = write_unity_source(tmp_path / "unity-sources", "2022.3.x", "linemarker")
         nearest_source = write_unity_source(tmp_path / "unity-sources", "2021.3.16f1", "nearestmarker")
         new_source = write_unity_source(tmp_path / "unity-sources", "6000.5.2f1", "newmarker")

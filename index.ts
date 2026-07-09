@@ -335,8 +335,9 @@ function formatShowResult(value: unknown): string {
 
 function inferUnityVersionFromSource(sourcePath: string): string {
   const normalized = sourcePath.replace(/\\/g, "/");
-  const match = normalized.match(/\/Editor\/([^/]+)\/Editor\/Data\/Documentation\/en$/i);
-  return match?.[1] ?? "unknown";
+  const versionPattern = /^\d+\.\d+(?:\.(?:\d+|x).*)?$/i;
+  const parts = normalized.split("/").filter(Boolean).reverse();
+  return parts.find((part) => versionPattern.test(part)) ?? "unknown";
 }
 
 function defaultDbDir(version: string): string {

@@ -427,9 +427,10 @@ def build_docdata_summary(index: dict[str, Any]) -> tuple[dict[str, str], dict[s
 
 def infer_version_from_source(source: Path) -> str:
     parts = list(source.resolve().parts)
-    for index, part in enumerate(parts):
-        if part.lower() == "editor" and index > 0:
-            return parts[index - 1]
+    version_pattern = re.compile(r"^\d+\.\d+(?:\.(?:\d+|x).*)?$", flags=re.IGNORECASE)
+    for part in reversed(parts):
+        if version_pattern.match(part):
+            return part
     return "unknown"
 
 
@@ -817,15 +818,30 @@ def discover_sources() -> list[Path]:
     program_files = os.environ.get("ProgramFiles")
     if program_files:
         roots.append(Path(program_files) / "Unity" / "Hub" / "Editor")
-    roots.append(Path("C:/Program Files/Unity/Hub/Editor"))
+    roots.extend([
+        Path("C:/Program Files/Unity/Hub/Editor"),
+        Path("/Applications/Unity/Hub/Editor"),
+        Path.home() / "Applications" / "Unity" / "Hub" / "Editor",
+        Path.home() / "Unity" / "Hub" / "Editor",
+        Path("/opt/Unity/Hub/Editor"),
+        Path("/opt/unity/Hub/Editor"),
+    ])
     found: list[Path] = []
+    seen_roots: set[Path] = set()
     for root in roots:
-        if not root.exists():
+        root = root.expanduser()
+        if root in seen_roots or not root.exists():
             continue
+        seen_roots.add(root)
         for child in root.iterdir():
-            candidate = child / "Editor" / "Data" / "Documentation" / "en"
-            if (candidate / "Manual").is_dir() and (candidate / "ScriptReference").is_dir():
-                found.append(candidate)
+            candidates = [
+                child / "Editor" / "Data" / "Documentation" / "en",
+                child / "Unity.app" / "Contents" / "Documentation" / "en",
+                child / "Unity.app" / "Contents" / "Resources" / "Documentation" / "en",
+            ]
+            for candidate in candidates:
+                if (candidate / "Manual").is_dir() and (candidate / "ScriptReference").is_dir():
+                    found.append(candidate)
     return sorted(set(found), key=lambda p: p.as_posix(), reverse=True)
 
 
