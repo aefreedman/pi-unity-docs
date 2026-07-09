@@ -66,6 +66,33 @@ Configuration is stored at:
 
 The generated database is named `unity_docs.sqlite` inside the selected database directory.
 
+### Multiple Unity versions
+
+Each Unity editor version should use its own database directory, for example:
+
+```text
+%LOCALAPPDATA%/pi/unity-docs/6000.4.7f1
+%LOCALAPPDATA%/pi/unity-docs/6000.5.2f1
+```
+
+`configure` and `build` record core Unity databases by version under `config.databases`. The most recently configured or built version becomes the global fallback `activeVersion`, but project-aware queries should prefer `--project <unity-project-path>` so the docs version is read from `ProjectSettings/ProjectVersion.txt`. All configured core Unity databases are also exposed as docsets named `unity-<version>` for explicit multi-version queries.
+
+When an exact project patch version is not configured, project-aware queries fall back only within the same Unity major/minor line:
+
+1. exact version, for example `6000.4.7f1`
+2. configured line database, for example `6000.4.x` or `6000.4`
+3. nearest configured patch in the same line, preferring the highest patch less than or equal to the project patch
+
+Queries do not silently fall forward to a different minor line such as `6000.5.x`; pass an explicit `--docset`/`--docsets` selector if that is intentional. Results include `requestedVersion` and `versionMatch` metadata when a project/version selector is used.
+
+Examples:
+
+```bash
+python scripts/unity_docs_db.py search "Physics.Raycast" --project "C:/path/to/UnityProject"
+python scripts/unity_docs_db.py search "Physics.Raycast" --docset unity-6000.4.7f1
+python scripts/unity_docs_db.py search "Physics.Raycast" --docsets unity-6000.4.7f1,input-system
+```
+
 ## Tools exposed to pi
 
 - `unity_docs_info` — show configuration and database status.

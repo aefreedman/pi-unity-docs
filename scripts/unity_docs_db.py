@@ -440,6 +440,121 @@ def default_db_dir(version: str) -> Path:
     return Path.home() / ".pi" / "unity-docs" / version
 
 
+def parse_unity_project_version_text(contents: str) -> str | None:
+    match = re.search(r"^m_EditorVersion:\s*(\S+)\s*$", contents, flags=re.MULTILINE)
+    return match.group(1) if match else None
+
+
+def find_unity_project_root(start: Path) -> Path | None:
+    current = start.expanduser().resolve()
+    if current.is_file():
+        current = current.parent
+    while True:
+        version_file = current / "ProjectSettings" / "ProjectVersion.txt"
+        if version_file.exists():
+            return current
+        parent = current.parent
+        if parent == current:
+            return None
+        current = parent
+
+
+def read_project_unity_version(project_path: str | None) -> str | None:
+    if not project_path:
+        return None
+    project_root = find_unity_project_root(Path(project_path))
+    if not project_root:
+        raise SystemExit(f"Could not find a Unity project at or above: {project_path}")
+    version_file = project_root / "ProjectSettings" / "ProjectVersion.txt"
+    version = parse_unity_project_version_text(version_file.read_text(encoding="utf-8", errors="replace"))
+    if not version:
+        raise SystemExit(f"Could not parse Unity version from: {version_file}")
+    return version
+
+
+@dataclass(frozen=True)
+class UnityVersionParts:
+    raw: str
+    major: int
+    minor: int
+    patch: int | None
+    suffix: str = ""
+    wildcard: bool = False
+
+
+def parse_unity_version(value: str | None) -> UnityVersionParts | None:
+    if not value:
+        return None
+    match = re.match(r"^(\d+)\.(\d+)(?:\.(x|\d+)(.*)?)?$", value.strip(), flags=re.IGNORECASE)
+    if not match:
+        return None
+    patch_token = match.group(3)
+    wildcard = patch_token is None or patch_token.lower() == "x"
+    patch = int(patch_token) if patch_token and patch_token.isdigit() else None
+    return UnityVersionParts(
+        raw=value.strip(),
+        major=int(match.group(1)),
+        minor=int(match.group(2)),
+        patch=patch,
+        suffix=match.group(4) or "",
+        wildcard=wildcard,
+    )
+
+
+def configured_or_project_version(args: argparse.Namespace, config: dict[str, Any] | None = None) -> str | None:
+    if getattr(args, "version", None):
+        return args.version
+    project_version = read_project_unity_version(getattr(args, "project", None))
+    if project_version:
+        return project_version
+    config = config if config is not None else load_config()
+    return config.get("activeVersion")
+
+
+def resolve_configured_unity_version(requested: str | None, databases: dict[str, Any]) -> tuple[str | None, str | None]:
+    if not requested:
+        return None, None
+    if requested in databases:
+        return requested, "exact"
+
+    requested_parts = parse_unity_version(requested)
+    if not requested_parts:
+        return None, None
+
+    same_line: list[tuple[str, UnityVersionParts]] = []
+    for version in databases:
+        parsed = parse_unity_version(str(version))
+        if parsed and parsed.major == requested_parts.major and parsed.minor == requested_parts.minor:
+            same_line.append((str(version), parsed))
+
+    wildcard_matches = [(version, parsed) for version, parsed in same_line if parsed.wildcard]
+    if wildcard_matches:
+        # Prefer explicit x-style line docsets (6000.4.x) over bare minor labels (6000.4).
+        wildcard_matches.sort(key=lambda item: (".x" in item[0].lower(), len(item[0])), reverse=True)
+        return wildcard_matches[0][0], "minor-line"
+
+    patch_matches = [(version, parsed) for version, parsed in same_line if parsed.patch is not None]
+    if patch_matches:
+        requested_patch = requested_parts.patch
+        if requested_patch is None:
+            patch_matches.sort(key=lambda item: item[1].patch or -1, reverse=True)
+            return patch_matches[0][0], "nearest-patch"
+        lower_or_equal = [item for item in patch_matches if (item[1].patch or -1) <= requested_patch]
+        if lower_or_equal:
+            lower_or_equal.sort(key=lambda item: item[1].patch or -1, reverse=True)
+            return lower_or_equal[0][0], "nearest-patch"
+        patch_matches.sort(key=lambda item: item[1].patch or 10**9)
+        return patch_matches[0][0], "nearest-patch"
+
+    return None, None
+
+
+def resolve_configured_or_project_version(args: argparse.Namespace, config: dict[str, Any]) -> tuple[str | None, str | None, str | None]:
+    requested = configured_or_project_version(args, config)
+    resolved, match_kind = resolve_configured_unity_version(requested, config.get("databases") or {})
+    return requested, resolved, match_kind
+
+
 def load_config() -> dict[str, Any]:
     if not CONFIG_PATH.exists():
         return {}
@@ -464,12 +579,14 @@ def resolve_db_path(args: argparse.Namespace) -> Path:
     if getattr(args, "db_dir", None):
         return db_path_from_dir(Path(args.db_dir).expanduser())
     config = load_config()
-    version = getattr(args, "version", None) or config.get("activeVersion")
+    requested_version, version, _match_kind = resolve_configured_or_project_version(args, config)
     databases = config.get("databases") or {}
     if version and version in databases and databases[version].get("dbPath"):
         return Path(databases[version]["dbPath"]).expanduser()
-    if config.get("dbPath"):
+    if not getattr(args, "project", None) and config.get("dbPath"):
         return Path(config["dbPath"]).expanduser()
+    if requested_version:
+        raise SystemExit(f"No Unity docs database is configured for Unity {requested_version}. Build that version, add a same-minor fallback (for example {requested_version.rsplit('.', 1)[0]}.x), or pass --db/--db-dir.")
     raise SystemExit("No database configured. Run configure or pass --db/--db-dir.")
 
 
@@ -477,11 +594,15 @@ def resolve_source_path(args: argparse.Namespace) -> Path:
     if getattr(args, "source", None):
         return Path(args.source).expanduser()
     config = load_config()
-    version = getattr(args, "version", None) or config.get("activeVersion")
+    version = configured_or_project_version(args, config)
     databases = config.get("databases") or {}
     if version and version in databases and databases[version].get("sourcePath"):
         return Path(databases[version]["sourcePath"]).expanduser()
-    if config.get("sourcePath"):
+    if version:
+        for candidate in discover_sources():
+            if infer_version_from_source(candidate) == version:
+                return candidate
+    if not getattr(args, "project", None) and config.get("sourcePath"):
         return Path(config["sourcePath"]).expanduser()
     raise SystemExit("No Unity documentation source configured. Run configure or pass --source.")
 
@@ -1080,6 +1201,9 @@ def build_database(source: Path, db_path: Path, version: str, force: bool = Fals
         create_schema(conn)
         conn.execute("INSERT INTO metadata(key, value) VALUES (?, ?)", ("version", version))
         conn.execute("INSERT INTO metadata(key, value) VALUES (?, ?)", ("sourcePath", str(source)))
+        conn.execute("INSERT INTO metadata(key, value) VALUES (?, ?)", ("docsetId", sanitize_docset_id(f"unity-{version}")))
+        conn.execute("INSERT INTO metadata(key, value) VALUES (?, ?)", ("docsetKind", "unity"))
+        conn.execute("INSERT INTO metadata(key, value) VALUES (?, ?)", ("docsetTitle", f"Unity {version}"))
         conn.execute("INSERT INTO metadata(key, value) VALUES (?, ?)", ("builtAt", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())))
 
         for corpus in corpora:
@@ -1380,7 +1504,7 @@ def annotate_docset(item: dict[str, Any], docset: dict[str, Any]) -> dict[str, A
     if not docset:
         return item
     annotated = dict(item)
-    for key in ["docsetId", "docsetTitle", "docsetKind", "packageName", "packageVersion"]:
+    for key in ["docsetId", "docsetTitle", "docsetKind", "packageName", "packageVersion", "version", "requestedVersion", "versionMatch"]:
         if docset.get(key) is not None:
             annotated[key] = docset.get(key)
     return annotated
@@ -1409,34 +1533,51 @@ def split_docset_ids(value: str | None) -> list[str]:
     return [part.strip() for part in value.split(",") if part.strip()]
 
 
-def legacy_core_docset(config: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
-    version = config.get("activeVersion")
+def core_unity_docsets(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    docsets: dict[str, dict[str, Any]] = {}
     databases = config.get("databases") or {}
-    if not version or version not in databases or not databases[version].get("dbPath"):
-        return None
-    docset_id = sanitize_docset_id(f"unity-{version}")
-    return docset_id, {
-        "kind": "unity",
-        "title": f"Unity {version}",
-        "version": version,
-        "sourcePath": databases[version].get("sourcePath"),
-        "dbPath": databases[version].get("dbPath"),
-        "priority": 100,
-        "enabled": True,
-    }
+    for version, database in databases.items():
+        if not isinstance(database, dict) or not database.get("dbPath"):
+            continue
+        docset_id = sanitize_docset_id(f"unity-{version}")
+        docsets[docset_id] = {
+            "kind": "unity",
+            "title": f"Unity {version}",
+            "version": version,
+            "sourcePath": database.get("sourcePath"),
+            "dbPath": database.get("dbPath"),
+            "priority": 100,
+            "enabled": True,
+        }
+    return docsets
 
 
 def resolve_query_docsets(args: argparse.Namespace) -> list[tuple[str, Path, dict[str, Any]]]:
     if has_direct_db_selector(args):
         db_path = resolve_db_path(args)
-        docset = docset_from_db_metadata(db_path)
+        config = load_config()
+        requested_version, resolved_version, match_kind = resolve_configured_or_project_version(args, config)
+        if not (getattr(args, "db", None) or getattr(args, "db_dir", None)) and resolved_version:
+            docset_id = sanitize_docset_id(f"unity-{resolved_version}")
+            docset = {
+                "docsetId": docset_id,
+                "docsetTitle": f"Unity {resolved_version}",
+                "docsetKind": "unity",
+                "version": resolved_version,
+                "requestedVersion": requested_version,
+                "versionMatch": match_kind,
+            }
+        else:
+            docset = docset_from_db_metadata(db_path)
         return [(docset.get("docsetId") or "direct", db_path, docset)]
 
     config = load_config()
-    docsets = dict(config.get("docsets") or {})
-    legacy_core = legacy_core_docset(config)
-    if legacy_core and legacy_core[0] not in docsets:
-        docsets[legacy_core[0]] = legacy_core[1]
+    docsets = core_unity_docsets(config)
+    docsets.update(dict(config.get("docsets") or {}))
+    project_version = read_project_unity_version(getattr(args, "project", None))
+    requested_core_version = project_version or config.get("activeVersion")
+    selected_core_version, selected_match_kind = resolve_configured_unity_version(requested_core_version, config.get("databases") or {})
+    selected_core_id = sanitize_docset_id(f"unity-{selected_core_version}") if selected_core_version else ""
     if not docsets:
         db_path = resolve_db_path(args)
         docset = docset_from_db_metadata(db_path)
@@ -1445,12 +1586,15 @@ def resolve_query_docsets(args: argparse.Namespace) -> list[tuple[str, Path, dic
     requested = split_docset_ids(getattr(args, "docsets", None))
     if getattr(args, "docset", None):
         requested.insert(0, args.docset)
+    explicit_requested = bool(requested)
+    if project_version and not explicit_requested and selected_core_id not in docsets:
+        raise SystemExit(f"No Unity docs database is configured for project Unity {project_version}. Build that version, add a same-minor fallback (for example {project_version.rsplit('.', 1)[0]}.x), or pass an explicit --docset/--docsets selector.")
     if not requested:
         profile_name = getattr(args, "profile", None) or config.get("activeProfile") or "default"
         profiles = config.get("profiles") or {}
         requested = list(profiles.get(profile_name) or [])
-        if legacy_core and legacy_core[0] not in requested:
-            requested.insert(0, legacy_core[0])
+        if selected_core_id and selected_core_id not in requested:
+            requested.insert(0, selected_core_id)
     if not requested:
         requested = [key for key, value in sorted(docsets.items(), key=lambda item: int((item[1] or {}).get("priority", 0)), reverse=True) if (value or {}).get("enabled", True)]
 
@@ -1469,6 +1613,9 @@ def resolve_query_docsets(args: argparse.Namespace) -> list[tuple[str, Path, dic
             "docsetKind": raw.get("kind") or "unity",
             "packageName": raw.get("packageName"),
             "packageVersion": raw.get("packageVersion"),
+            "version": raw.get("version"),
+            "requestedVersion": requested_core_version if docset_id == selected_core_id else None,
+            "versionMatch": selected_match_kind if docset_id == selected_core_id else None,
             "priority": raw.get("priority", 0),
             "validationQueries": raw.get("validationQueries"),
         }
@@ -1524,6 +1671,11 @@ def search_docsets(args: argparse.Namespace) -> list[dict[str, Any]]:
     per_docset_limit = max(args.limit, 5)
     for _docset_id, db_path, docset in docsets:
         if not db_path.exists():
+            continue
+        docset_kind = str(docset.get("docsetKind") or "unity")
+        if args.corpus in {"Manual", "ScriptReference"} and docset_kind == "package":
+            continue
+        if args.corpus == "Package" and docset_kind != "package":
             continue
         for row in search_db(db_path, args.query, per_docset_limit, args.corpus, docset):
             row["docsetPriority"] = docset.get("priority", 0)
@@ -1684,7 +1836,9 @@ def show_docsets(args: argparse.Namespace, sections_filter: list[str] | None) ->
     if not explicit_docset and ":" in page:
         possible_docset, possible_page = page.split(":", 1)
         config = load_config()
-        if possible_docset in (config.get("docsets") or {}):
+        known_docsets = core_unity_docsets(config)
+        known_docsets.update(config.get("docsets") or {})
+        if possible_docset in known_docsets:
             explicit_docset = possible_docset
             page = possible_page
     if explicit_docset:
@@ -1718,6 +1872,7 @@ def info_db(args: argparse.Namespace) -> dict[str, Any]:
     except SystemExit:
         db_path = None
     discovered = [str(path) for path in discover_sources()] if getattr(args, "discover", False) else []
+    project_version = read_project_unity_version(getattr(args, "project", None))
     info: dict[str, Any] = {
         "configPath": str(CONFIG_PATH),
         "config": config,
@@ -1725,16 +1880,21 @@ def info_db(args: argparse.Namespace) -> dict[str, Any]:
         "dbExists": bool(db_path and db_path.exists()),
         "discoveredSources": discovered,
     }
+    requested_info_version = project_version or config.get("activeVersion")
+    resolved_info_version, info_match_kind = resolve_configured_unity_version(requested_info_version, config.get("databases") or {})
+    if project_version:
+        info["projectVersion"] = project_version
+    if resolved_info_version:
+        info["resolvedDocsVersion"] = resolved_info_version
+        info["versionMatch"] = info_match_kind
     if db_path and db_path.exists():
         conn = ensure_db(db_path)
         metadata = {row["key"]: row["value"] for row in conn.execute("SELECT key, value FROM metadata")}
         info["metadata"] = metadata
         conn.close()
     docset_status: dict[str, Any] = {}
-    configured_docsets = dict(config.get("docsets") or {})
-    legacy_core = legacy_core_docset(config)
-    if legacy_core and legacy_core[0] not in configured_docsets:
-        configured_docsets[legacy_core[0]] = legacy_core[1]
+    configured_docsets = core_unity_docsets(config)
+    configured_docsets.update(dict(config.get("docsets") or {}))
     for docset_id, docset in configured_docsets.items():
         db_path_value = docset.get("dbPath")
         source_path_value = docset.get("sourcePath")
@@ -1796,14 +1956,15 @@ def cmd_configure(args: argparse.Namespace) -> None:
 
 def cmd_build(args: argparse.Namespace) -> None:
     source = resolve_source_path(args)
-    version = args.version or infer_version_from_source(source)
+    version = configured_or_project_version(args) or infer_version_from_source(source)
     db_path = resolve_db_path(args) if (args.db or args.db_dir) else db_path_from_dir(default_db_dir(version))
     if not (args.db or args.db_dir):
-        # Preserve configured dbPath when available.
-        try:
-            db_path = resolve_db_path(args)
-        except SystemExit:
-            pass
+        # Preserve configured exact-version dbPath when available, but do not
+        # build an exact patch version into a same-line fallback DB.
+        config = load_config()
+        configured_db = (config.get("databases") or {}).get(version, {})
+        if isinstance(configured_db, dict) and configured_db.get("dbPath"):
+            db_path = Path(configured_db["dbPath"]).expanduser()
     result = build_database(source, db_path, version, force=args.force, limit=args.limit, write_config=not args.no_config, progress=args.progress)
     print_json_or_text(result, args.json)
 
@@ -2034,6 +2195,7 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument("--db", help="Explicit SQLite database path.")
     build.add_argument("--db-dir", help="Directory where unity_docs.sqlite should be installed.")
     build.add_argument("--version", help="Unity version label.")
+    build.add_argument("--project", help="Unity project path used to infer the documentation version from ProjectSettings/ProjectVersion.txt.")
     build.add_argument("--force", action="store_true", help="Replace an existing database.")
     build.add_argument("--limit", type=int, help="Debug: only process this many pages total.")
     build.add_argument("--no-config", action="store_true", help="Do not update ~/.pi/unity-docs/config.json after building.")
@@ -2066,6 +2228,7 @@ def build_parser() -> argparse.ArgumentParser:
     info.add_argument("--db", help="Explicit SQLite database path.")
     info.add_argument("--db-dir", help="Directory containing unity_docs.sqlite.")
     info.add_argument("--version", help="Unity version label from config.")
+    info.add_argument("--project", help="Unity project path used to select the matching Unity documentation version.")
     info.add_argument("--profile", help="Documentation profile to inspect.")
     info.add_argument("--docset", help="Documentation docset id to inspect.")
     info.add_argument("--discover", action="store_true", help="Include discovered Unity documentation sources.")
@@ -2076,6 +2239,7 @@ def build_parser() -> argparse.ArgumentParser:
     validate.add_argument("--db", help="Explicit SQLite database path.")
     validate.add_argument("--db-dir", help="Directory containing unity_docs.sqlite.")
     validate.add_argument("--version", help="Unity version label from config.")
+    validate.add_argument("--project", help="Unity project path used to select the matching Unity documentation version.")
     validate.add_argument("--profile", help="Documentation profile to validate.")
     validate.add_argument("--docset", help="Documentation docset id to validate.")
     validate.add_argument("--docsets", help="Comma-separated documentation docset ids to validate.")
@@ -2088,6 +2252,7 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--db", help="Explicit SQLite database path.")
     search.add_argument("--db-dir", help="Directory containing unity_docs.sqlite.")
     search.add_argument("--version", help="Unity version label from config.")
+    search.add_argument("--project", help="Unity project path used to select the matching Unity documentation version.")
     search.add_argument("--profile", help="Documentation profile to search.")
     search.add_argument("--docset", help="Documentation docset id to search.")
     search.add_argument("--docsets", help="Comma-separated documentation docset ids to search.")
@@ -2101,6 +2266,7 @@ def build_parser() -> argparse.ArgumentParser:
     symbol.add_argument("--db", help="Explicit SQLite database path.")
     symbol.add_argument("--db-dir", help="Directory containing unity_docs.sqlite.")
     symbol.add_argument("--version", help="Unity version label from config.")
+    symbol.add_argument("--project", help="Unity project path used to select the matching Unity documentation version.")
     symbol.add_argument("--profile", help="Documentation profile to search.")
     symbol.add_argument("--docset", help="Documentation docset id to search.")
     symbol.add_argument("--docsets", help="Comma-separated documentation docset ids to search.")
@@ -2113,6 +2279,7 @@ def build_parser() -> argparse.ArgumentParser:
     show.add_argument("--db", help="Explicit SQLite database path.")
     show.add_argument("--db-dir", help="Directory containing unity_docs.sqlite.")
     show.add_argument("--version", help="Unity version label from config.")
+    show.add_argument("--project", help="Unity project path used to select the matching Unity documentation version.")
     show.add_argument("--profile", help="Documentation profile to search.")
     show.add_argument("--docset", help="Documentation docset id to search.")
     show.add_argument("--docsets", help="Comma-separated documentation docset ids to search.")

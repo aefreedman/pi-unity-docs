@@ -5,6 +5,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import os from "node:os";
+import fs from "node:fs";
 
 const packageRoot = path.dirname(fileURLToPath(import.meta.url));
 const scriptPath = path.join(packageRoot, "scripts", "unity_docs_db.py");
@@ -272,7 +273,7 @@ function formatConfiguredDocsetHint(info: unknown): string {
   ].join("\n");
 }
 
-async function buildNoResultDocsetHint(params: { db?: string; dbDir?: string; version?: string; profile?: string; docset?: string }): Promise<string> {
+async function buildNoResultDocsetHint(params: { db?: string; dbDir?: string; version?: string; projectPath?: string; profile?: string; docset?: string }): Promise<string> {
   try {
     return formatConfiguredDocsetHint((await runScript(["--json", "info", ...buildInfoArgs(params)], 30_000)).json);
   } catch {
@@ -288,8 +289,9 @@ function formatSearchResults(results: Record<string, unknown>[], noResultHint = 
     const heading = String(result.headingPath ?? "");
     const snippet = String(result.snippet ?? "").replace(/\s+/g, " ").trim();
     const docset = String(result.docsetTitle ?? result.docsetId ?? "");
+    const versionNote = result.versionMatch && result.versionMatch !== "exact" ? ` [${String(result.versionMatch)} for ${String(result.requestedVersion ?? "requested project version")}]` : "";
     return [
-      `${index + 1}. ${pageId} — ${title}${docset ? ` [${docset}]` : ""}`,
+      `${index + 1}. ${pageId} — ${title}${docset ? ` [${docset}]` : ""}${versionNote}`,
       heading ? `   Section: ${heading}` : undefined,
       snippet ? `   ${truncate(snippet, 700)}` : undefined,
     ].filter(Boolean).join("\n");
@@ -305,8 +307,9 @@ function formatSymbolResults(results: Record<string, unknown>[], noResultHint = 
     const signature = String(result.signature ?? "");
     const summary = String(result.summary ?? "");
     const docset = String(result.docsetTitle ?? result.docsetId ?? "");
+    const versionNote = result.versionMatch && result.versionMatch !== "exact" ? ` [${String(result.versionMatch)} for ${String(result.requestedVersion ?? "requested project version")}]` : "";
     return [
-      `${index + 1}. ${fullName}${kind ? ` [${kind}]` : ""}${docset ? ` [${docset}]` : ""}`,
+      `${index + 1}. ${fullName}${kind ? ` [${kind}]` : ""}${docset ? ` [${docset}]` : ""}${versionNote}`,
       pageId ? `   Page: ${pageId}` : undefined,
       signature ? `   Signature: ${truncate(signature, 900)}` : undefined,
       summary ? `   Summary: ${truncate(summary, 500)}` : undefined,
@@ -319,7 +322,8 @@ function formatShowResult(value: unknown): string {
   const page = result.page ?? {};
   const sections = result.sections ?? [];
   const docset = String(page.docsetTitle ?? page.docsetId ?? "");
-  const lines = [`# ${String(page.id ?? "")} — ${String(page.title ?? "")}${docset ? ` [${docset}]` : ""}`];
+  const versionNote = page.versionMatch && page.versionMatch !== "exact" ? ` [${String(page.versionMatch)} for ${String(page.requestedVersion ?? "requested project version")}]` : "";
+  const lines = [`# ${String(page.id ?? "")} — ${String(page.title ?? "")}${docset ? ` [${docset}]` : ""}${versionNote}`];
   if (page.summary) lines.push(`Summary: ${String(page.summary)}`);
   for (const section of sections) {
     lines.push(`\n## ${String(section.headingPath ?? "")}`);
@@ -341,22 +345,52 @@ function defaultDbDir(version: string): string {
   return path.join(os.homedir(), ".pi", "unity-docs", version);
 }
 
-function buildCommonDbArgs(params: { db?: string; dbDir?: string; version?: string; profile?: string; docset?: string; docsets?: string[] | string }): string[] {
+function findAncestorUnityProjectSync(startDir?: string): string | undefined {
+  if (!startDir) return undefined;
+  let current = path.resolve(startDir);
+  try {
+    if (fs.existsSync(current) && fs.statSync(current).isFile()) current = path.dirname(current);
+  } catch {
+    return undefined;
+  }
+  while (true) {
+    if (fs.existsSync(path.join(current, "ProjectSettings", "ProjectVersion.txt"))) return current;
+    const parent = path.dirname(current);
+    if (parent === current) return undefined;
+    current = parent;
+  }
+}
+
+function hasExplicitDocsSelector(params: { db?: string; dbDir?: string; version?: string; projectPath?: string; docset?: string; docsets?: string[] | string }): boolean {
+  return Boolean(params.db || params.dbDir || params.version || params.projectPath || params.docset || (Array.isArray(params.docsets) ? params.docsets.length : params.docsets));
+}
+
+function buildCommonDbArgs(params: { db?: string; dbDir?: string; version?: string; projectPath?: string; profile?: string; docset?: string; docsets?: string[] | string }, cwd?: string): string[] {
   const args: string[] = [];
+  if (!hasExplicitDocsSelector(params)) {
+    const projectRoot = findAncestorUnityProjectSync(cwd);
+    if (projectRoot) args.push("--project", projectRoot);
+  }
   if (params.db) args.push("--db", params.db);
   if (params.dbDir) args.push("--db-dir", params.dbDir);
   if (params.version) args.push("--version", params.version);
+  if (params.projectPath) args.push("--project", params.projectPath);
   if (params.profile) args.push("--profile", params.profile);
   if (params.docset) args.push("--docset", params.docset);
   if (params.docsets) args.push("--docsets", Array.isArray(params.docsets) ? params.docsets.join(",") : params.docsets);
   return args;
 }
 
-function buildInfoArgs(params: { db?: string; dbDir?: string; version?: string; profile?: string; docset?: string }): string[] {
+function buildInfoArgs(params: { db?: string; dbDir?: string; version?: string; projectPath?: string; profile?: string; docset?: string }, cwd?: string): string[] {
   const args: string[] = [];
+  if (!hasExplicitDocsSelector(params)) {
+    const projectRoot = findAncestorUnityProjectSync(cwd);
+    if (projectRoot) args.push("--project", projectRoot);
+  }
   if (params.db) args.push("--db", params.db);
   if (params.dbDir) args.push("--db-dir", params.dbDir);
   if (params.version) args.push("--version", params.version);
+  if (params.projectPath) args.push("--project", params.projectPath);
   if (params.profile) args.push("--profile", params.profile);
   if (params.docset) args.push("--docset", params.docset);
   return args;
@@ -371,33 +405,48 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      let discoveredSource = "";
+      let discoveredSources: string[] = [];
       try {
         const info = await runScript(["--json", "info", "--discover"], 30_000);
-        const discovered = (info.json as { discoveredSources?: string[] } | undefined)?.discoveredSources ?? [];
-        discoveredSource = discovered[0] ?? "";
+        discoveredSources = (info.json as { discoveredSources?: string[] } | undefined)?.discoveredSources ?? [];
       } catch {
-        discoveredSource = "";
+        discoveredSources = [];
       }
 
-      const sourcePath = await ctx.ui.input("Unity documentation source directory", discoveredSource || "C:/Program Files/Unity/Hub/Editor/<version>/Editor/Data/Documentation/en");
+      const manualChoice = "Enter a Unity documentation path manually...";
+      let sourcePath = "";
+      if (discoveredSources.length > 0) {
+        const labels = discoveredSources.map((source) => `${inferUnityVersionFromSource(source)} — ${source}`);
+        const selected = await ctx.ui.select("Select Unity documentation source", [...labels, manualChoice]);
+        if (!selected) {
+          ctx.ui.notify("Unity docs configuration cancelled.", "info");
+          return;
+        }
+        if (selected !== manualChoice) {
+          const selectedIndex = labels.indexOf(selected);
+          sourcePath = discoveredSources[selectedIndex] ?? "";
+        }
+      }
+
       if (!sourcePath) {
-        ctx.ui.notify("Unity docs configuration cancelled.", "info");
-        return;
+        sourcePath = await ctx.ui.input("Unity documentation source directory", discoveredSources[0] || "C:/Program Files/Unity/Hub/Editor/<version>/Editor/Data/Documentation/en") ?? "";
+        if (!sourcePath) {
+          ctx.ui.notify("Unity docs configuration cancelled.", "info");
+          return;
+        }
       }
 
       const inferredVersion = inferUnityVersionFromSource(sourcePath);
-      const version = await ctx.ui.input("Unity version label", inferredVersion);
-      if (!version) {
-        ctx.ui.notify("Unity docs configuration cancelled.", "info");
-        return;
+      let version = inferredVersion;
+      if (!version || version === "unknown") {
+        version = await ctx.ui.input("Unity version label", inferredVersion || "6000.0.0f1") ?? "";
+        if (!version) {
+          ctx.ui.notify("Unity docs configuration cancelled.", "info");
+          return;
+        }
       }
 
-      const dbDir = await ctx.ui.input("Database install directory", defaultDbDir(version));
-      if (!dbDir) {
-        ctx.ui.notify("Unity docs configuration cancelled.", "info");
-        return;
-      }
+      const dbDir = defaultDbDir(version);
 
       const configured = await runScript(["--json", "configure", "--source", sourcePath, "--db-dir", dbDir, "--version", version, "--yes"], 60_000);
       const buildNow = await ctx.ui.confirm("Build Unity docs database now?", "This may take several minutes for the full ScriptReference.");
@@ -428,17 +477,18 @@ export default function (pi: ExtensionAPI) {
       db: Type.Optional(Type.String({ description: "Explicit SQLite database path." })),
       dbDir: Type.Optional(Type.String({ description: "Directory containing unity_docs.sqlite." })),
       version: Type.Optional(Type.String({ description: "Unity version label from config." })),
+      projectPath: Type.Optional(Type.String({ description: "Unity project path used to select the matching docs version from ProjectSettings/ProjectVersion.txt." })),
       profile: Type.Optional(Type.String({ description: "Documentation profile from config." })),
       docset: Type.Optional(Type.String({ description: "Documentation docset id from config." })),
     }),
     renderCall(args, theme, context) {
-      return renderReadStyleCall("unity docs info", args.version ?? args.dbDir ?? args.db ?? "configured database", theme, context);
+      return renderReadStyleCall("unity docs info", args.projectPath ?? args.version ?? args.dbDir ?? args.db ?? "configured database", theme, context);
     },
     renderResult(result, options, theme, context) {
       return renderReadStyleResult("info", result, options, theme, context);
     },
-    async execute(_toolCallId, params) {
-      const args = ["--json", "info", ...buildInfoArgs(params)];
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const args = ["--json", "info", ...buildInfoArgs(params, ctx?.cwd)];
       if (params.discover) args.push("--discover");
       const result = await runScript(args, 60_000);
       return {
@@ -464,6 +514,7 @@ export default function (pi: ExtensionAPI) {
       db: Type.Optional(Type.String({ description: "Explicit SQLite database path." })),
       dbDir: Type.Optional(Type.String({ description: "Directory containing unity_docs.sqlite." })),
       version: Type.Optional(Type.String({ description: "Unity version label from config." })),
+      projectPath: Type.Optional(Type.String({ description: "Unity project path used to select the matching docs version from ProjectSettings/ProjectVersion.txt." })),
       profile: Type.Optional(Type.String({ description: "Documentation profile from config." })),
       docset: Type.Optional(Type.String({ description: "Documentation docset id from config." })),
       docsets: Type.Optional(Type.Array(Type.String(), { description: "Documentation docset ids from config." })),
@@ -474,8 +525,8 @@ export default function (pi: ExtensionAPI) {
     renderResult(result, options, theme, context) {
       return renderReadStyleResult("search", result, options, theme, context);
     },
-    async execute(_toolCallId, params) {
-      const args = ["--json", "search", params.query, "--limit", String(params.limit ?? 8), ...buildCommonDbArgs(params)];
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const args = ["--json", "search", params.query, "--limit", String(params.limit ?? 8), ...buildCommonDbArgs(params, ctx?.cwd)];
       if (params.corpus) args.push("--corpus", params.corpus);
       const result = await runScript(args, 120_000);
       const rows = asArray(result.json);
@@ -499,6 +550,7 @@ export default function (pi: ExtensionAPI) {
       db: Type.Optional(Type.String({ description: "Explicit SQLite database path." })),
       dbDir: Type.Optional(Type.String({ description: "Directory containing unity_docs.sqlite." })),
       version: Type.Optional(Type.String({ description: "Unity version label from config." })),
+      projectPath: Type.Optional(Type.String({ description: "Unity project path used to select the matching docs version from ProjectSettings/ProjectVersion.txt." })),
       profile: Type.Optional(Type.String({ description: "Documentation profile from config." })),
       docset: Type.Optional(Type.String({ description: "Documentation docset id from config." })),
       docsets: Type.Optional(Type.Array(Type.String(), { description: "Documentation docset ids from config." })),
@@ -509,8 +561,8 @@ export default function (pi: ExtensionAPI) {
     renderResult(result, options, theme, context) {
       return renderReadStyleResult("symbol", result, options, theme, context);
     },
-    async execute(_toolCallId, params) {
-      const result = await runScript(["--json", "symbol", params.name, "--limit", String(params.limit ?? 8), ...buildCommonDbArgs(params)], 120_000);
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const result = await runScript(["--json", "symbol", params.name, "--limit", String(params.limit ?? 8), ...buildCommonDbArgs(params, ctx?.cwd)], 120_000);
       const rows = asArray(result.json);
       const hint = rows.length === 0 ? await buildNoResultDocsetHint(params) : "";
       return {
@@ -533,6 +585,7 @@ export default function (pi: ExtensionAPI) {
       db: Type.Optional(Type.String({ description: "Explicit SQLite database path." })),
       dbDir: Type.Optional(Type.String({ description: "Directory containing unity_docs.sqlite." })),
       version: Type.Optional(Type.String({ description: "Unity version label from config." })),
+      projectPath: Type.Optional(Type.String({ description: "Unity project path used to select the matching docs version from ProjectSettings/ProjectVersion.txt." })),
       profile: Type.Optional(Type.String({ description: "Documentation profile from config." })),
       docset: Type.Optional(Type.String({ description: "Documentation docset id from config." })),
       docsets: Type.Optional(Type.Array(Type.String(), { description: "Documentation docset ids from config." })),
@@ -543,8 +596,8 @@ export default function (pi: ExtensionAPI) {
     renderResult(result, options, theme, context) {
       return renderReadStyleResult("show", result, options, theme, context);
     },
-    async execute(_toolCallId, params) {
-      const args = ["--json", "show", params.page, "--max-chars", String(params.maxChars ?? 6000), ...buildCommonDbArgs(params)];
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const args = ["--json", "show", params.page, "--max-chars", String(params.maxChars ?? 6000), ...buildCommonDbArgs(params, ctx?.cwd)];
       if (params.sections?.length) args.push("--sections", params.sections.join(","));
       const result = await runScript(args, 120_000);
       return {
@@ -563,6 +616,7 @@ export default function (pi: ExtensionAPI) {
       db: Type.Optional(Type.String({ description: "Explicit SQLite database path." })),
       dbDir: Type.Optional(Type.String({ description: "Directory containing unity_docs.sqlite." })),
       version: Type.Optional(Type.String({ description: "Unity version label from config." })),
+      projectPath: Type.Optional(Type.String({ description: "Unity project path used to select the matching docs version from ProjectSettings/ProjectVersion.txt." })),
       profile: Type.Optional(Type.String({ description: "Documentation profile from config." })),
       docset: Type.Optional(Type.String({ description: "Documentation docset id from config." })),
       docsets: Type.Optional(Type.Array(Type.String(), { description: "Documentation docset ids from config." })),
@@ -578,8 +632,8 @@ export default function (pi: ExtensionAPI) {
       text.setText(theme.fg("toolOutput", summary));
       return text;
     },
-    async execute(_toolCallId, params) {
-      const args = ["--json", "validate", "--limit", String(params.limit ?? 5), ...buildCommonDbArgs(params)];
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const args = ["--json", "validate", "--limit", String(params.limit ?? 5), ...buildCommonDbArgs(params, ctx?.cwd)];
       const result = await runScript(args, 300_000);
       return {
         content: [{ type: "text", text: `Unity docs validation complete.\n${JSON.stringify(result.json, null, 2)}` }],

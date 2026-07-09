@@ -20,6 +20,29 @@ def run(args, home):
     return json.loads(result.stdout)
 
 
+def write_unity_source(root: Path, version: str, marker: str) -> Path:
+    source = root / version / "Editor" / "Data" / "Documentation" / "en"
+    for corpus in ["Manual", "ScriptReference"]:
+        corpus_root = source / corpus
+        corpus_root.mkdir(parents=True)
+        (corpus_root / "Example.html").write_text(f"""
+<html><body><div class=\"section\">
+<h1>{corpus} Example</h1>
+<h2>Overview</h2>
+<p>{marker} documentation for Unity {version}.</p>
+</div></body></html>
+""", encoding="utf-8")
+    return source
+
+
+def write_unity_project(root: Path, version: str) -> Path:
+    project = root / f"Project-{version}"
+    (project / "ProjectSettings").mkdir(parents=True)
+    (project / "Assets").mkdir()
+    (project / "ProjectSettings" / "ProjectVersion.txt").write_text(f"m_EditorVersion: {version}\n", encoding="utf-8")
+    return project
+
+
 def write_package(root: Path, name="com.example.input", version="1.2.3", title="Example Input") -> Path:
     docs = root / "Documentation~"
     docs.mkdir(parents=True)
@@ -57,6 +80,38 @@ def main():
         tmp_path = Path(tmp)
         home = tmp_path / "home"
         home.mkdir()
+
+        old_source = write_unity_source(tmp_path / "unity-sources", "2022.3.18f1", "oldmarker")
+        line_source = write_unity_source(tmp_path / "unity-sources", "2022.3.x", "linemarker")
+        nearest_source = write_unity_source(tmp_path / "unity-sources", "2021.3.16f1", "nearestmarker")
+        new_source = write_unity_source(tmp_path / "unity-sources", "6000.5.2f1", "newmarker")
+        old_project = write_unity_project(tmp_path, "2022.3.18f1")
+        line_project = write_unity_project(tmp_path, "2022.3.19f1")
+        nearest_project = write_unity_project(tmp_path, "2021.3.18f1")
+        run(["build", "--source", str(old_source), "--db-dir", str(tmp_path / "unity-old-db"), "--version", "2022.3.18f1", "--force"], home)
+        run(["build", "--source", str(line_source), "--db-dir", str(tmp_path / "unity-line-db"), "--version", "2022.3.x", "--force"], home)
+        run(["build", "--source", str(nearest_source), "--db-dir", str(tmp_path / "unity-nearest-db"), "--version", "2021.3.16f1", "--force"], home)
+        run(["build", "--source", str(new_source), "--db-dir", str(tmp_path / "unity-new-db"), "--version", "6000.5.2f1", "--force"], home)
+
+        multi_info = run(["info", "--project", str(old_project)], home)
+        assert multi_info["projectVersion"] == "2022.3.18f1"
+        assert "unity-2022.3.18f1" in multi_info["docsets"]
+        assert "unity-2022.3.x" in multi_info["docsets"]
+        assert "unity-6000.5.2f1" in multi_info["docsets"]
+        project_search = run(["search", "oldmarker", "--project", str(old_project), "--limit", "5"], home)
+        assert project_search and project_search[0]["docsetId"] == "unity-2022.3.18f1"
+        assert project_search[0]["versionMatch"] == "exact"
+        line_search = run(["search", "linemarker", "--project", str(line_project), "--limit", "5"], home)
+        assert line_search and line_search[0]["docsetId"] == "unity-2022.3.x"
+        assert line_search[0]["requestedVersion"] == "2022.3.19f1"
+        assert line_search[0]["versionMatch"] == "minor-line"
+        nearest_search = run(["search", "nearestmarker", "--project", str(nearest_project), "--limit", "5"], home)
+        assert nearest_search and nearest_search[0]["docsetId"] == "unity-2021.3.16f1"
+        assert nearest_search[0]["versionMatch"] == "nearest-patch"
+        explicit_old = run(["search", "oldmarker", "--docset", "unity-2022.3.18f1", "--limit", "5"], home)
+        assert explicit_old and explicit_old[0]["docsetId"] == "unity-2022.3.18f1"
+        default_new = run(["search", "newmarker", "--limit", "5"], home)
+        assert default_new and default_new[0]["docsetId"] == "unity-6000.5.2f1"
 
         package_root = tmp_path / "pkg"
         docs = write_package(package_root)

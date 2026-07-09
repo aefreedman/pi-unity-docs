@@ -44,6 +44,8 @@ Status/configuration:
 unity_docs_info()
 ```
 
+When answering for a specific Unity project, pass `projectPath` when available. The tools read that project's `ProjectSettings/ProjectVersion.txt` and select the matching Unity core docs instead of assuming the globally configured fallback `activeVersion`. Multiple Unity versions may be configured at once and can be targeted explicitly with docsets such as `unity-6000.4.7f1`. If the exact patch docs are not configured, project-aware queries may fall back within the same major/minor line (`6000.4.x` or nearest `6000.4.*`) and expose `requestedVersion`/`versionMatch` metadata; do not assume docs from a different minor line unless explicitly selected.
+
 Package/plugin docs configured as separate docsets are searched with the active docs profile by default. If a question mentions a package/plugin by name (for example Shapes, Odin, DOTween, Input System, UI Test Framework), call `unity_docs_info()` when you are unsure which docsets are configured, then search the relevant docset explicitly with `docset` or `docsets` if broad search results do not surface it. Use `docset`/`docsets` filters to narrow results, disambiguate a `unity_docs_show` call, or verify that a package docset such as `shapes` is actually being searched.
 
 ## Building the cache

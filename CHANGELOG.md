@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Added project-aware Unity documentation selection from `ProjectSettings/ProjectVersion.txt`, including exact, same-minor line, and nearest-patch matching across configured Unity databases.
+- Exposed configured Unity databases as `unity-<version>` docsets for explicit multi-version queries.
+
+### Changed
+
+- Improved Unity docs setup to select among discovered documentation sources and default database directories by Unity version.
+- Included version-match metadata in search, symbol, and page output when project-aware fallback selection is used.
+
 ## 0.3.0 - 2026-06-27
 
 ### Changed
