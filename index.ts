@@ -1,15 +1,16 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
-import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import os from "node:os";
 import fs from "node:fs";
+import { selectPythonCommand } from "./scripts/python-selector.mjs";
+import { runSupervisedProcess } from "./scripts/supervised-process.mjs";
 
 const packageRoot = path.dirname(fileURLToPath(import.meta.url));
 const scriptPath = path.join(packageRoot, "scripts", "unity_docs_db.py");
-const pythonCommand = process.env.PI_UNITY_DOCS_PYTHON || "python";
+const pythonCommand = selectPythonCommand();
 
 type ScriptResult = {
   stdout: string;
@@ -179,74 +180,64 @@ function formatProgressLine(line: string): string | null {
   }
 }
 
-function runScript(args: string[], timeoutMs = 120_000, onProgress?: (message: string) => void): Promise<ScriptResult> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(pythonCommand, [scriptPath, ...args], {
-      windowsHide: true,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-
-    let stdout = "";
-    let stderr = "";
-    let stderrLineBuffer = "";
-    let lastProgressAt = Date.now();
-    const timer = setTimeout(() => {
-      child.kill();
-      reject(new Error(`Unity docs script timed out after ${Math.round(timeoutMs / 1000)}s.`));
-    }, timeoutMs);
-    const heartbeat = onProgress
-      ? setInterval(() => {
-          if (Date.now() - lastProgressAt >= 15_000) {
-            lastProgressAt = Date.now();
-            onProgress("Unity docs build still running...");
-          }
-        }, 15_000)
-      : undefined;
-
-    const clearTimers = () => {
-      clearTimeout(timer);
-      if (heartbeat) clearInterval(heartbeat);
-    };
-
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk) => { stdout += chunk; });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk;
-      stderrLineBuffer += chunk;
-      const lines = stderrLineBuffer.split(/\r?\n/);
-      stderrLineBuffer = lines.pop() ?? "";
-      for (const line of lines) {
-        const message = formatProgressLine(line.trim());
-        if (message && onProgress) {
+async function runScript(args: string[], timeoutMs = 120_000, onProgress?: (message: string) => void): Promise<ScriptResult> {
+  let stdout = "";
+  let stderr = "";
+  let stderrLineBuffer = "";
+  let lastProgressAt = Date.now();
+  const heartbeat = onProgress
+    ? setInterval(() => {
+        if (Date.now() - lastProgressAt >= 15_000) {
           lastProgressAt = Date.now();
-          onProgress(message);
+          onProgress("Unity docs build still running...");
         }
-      }
-    });
-    child.on("error", (error) => {
-      clearTimers();
-      reject(error);
-    });
-    child.on("close", (exitCode) => {
-      clearTimers();
-      const finalProgress = formatProgressLine(stderrLineBuffer.trim());
-      if (finalProgress && onProgress) onProgress(finalProgress);
-      if (exitCode !== 0) {
-        reject(new Error([`Unity docs script failed with exit code ${exitCode}.`, stderr.trim(), stdout.trim()].filter(Boolean).join("\n")));
-        return;
-      }
-      let parsed: unknown | undefined;
-      if (stdout.trim()) {
-        try {
-          parsed = JSON.parse(stdout);
-        } catch {
-          // Text mode output is still useful for diagnostics.
+      }, 15_000)
+    : undefined;
+
+  try {
+    const result = await runSupervisedProcess(pythonCommand, [scriptPath, ...args], {
+      timeoutMs,
+      spawnOptions: {
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+      onStdout: (chunk) => { stdout += chunk.toString(); },
+      onStderr: (chunk) => {
+        const text = chunk.toString();
+        stderr += text;
+        stderrLineBuffer += text;
+        const lines = stderrLineBuffer.split(/\r?\n/);
+        stderrLineBuffer = lines.pop() ?? "";
+        for (const line of lines) {
+          const message = formatProgressLine(line.trim());
+          if (message && onProgress) {
+            lastProgressAt = Date.now();
+            onProgress(message);
+          }
         }
-      }
-      resolve({ stdout, stderr, exitCode, json: parsed });
+      },
     });
-  });
+
+    if (result.error) throw result.error;
+    if (result.timedOut) throw new Error(`Unity docs script timed out after ${Math.round(timeoutMs / 1000)}s.`);
+
+    const finalProgress = formatProgressLine(stderrLineBuffer.trim());
+    if (finalProgress && onProgress) onProgress(finalProgress);
+    if (result.exitCode !== 0) {
+      throw new Error([`Unity docs script failed with exit code ${result.exitCode}.`, stderr.trim(), stdout.trim()].filter(Boolean).join("\n"));
+    }
+    let parsed: unknown | undefined;
+    if (stdout.trim()) {
+      try {
+        parsed = JSON.parse(stdout);
+      } catch {
+        // Text mode output is still useful for diagnostics.
+      }
+    }
+    return { stdout, stderr, exitCode: result.exitCode, json: parsed };
+  } finally {
+    if (heartbeat) clearInterval(heartbeat);
+  }
 }
 
 function asArray(value: unknown): Record<string, unknown>[] {
@@ -346,6 +337,16 @@ function defaultDbDir(version: string): string {
   return path.join(os.homedir(), ".pi", "unity-docs", version);
 }
 
+function defaultUnityDocsSourceHint(platform: NodeJS.Platform = process.platform): string {
+  if (platform === "darwin") {
+    return "/Applications/Unity/Hub/Editor/<version>/Unity.app/Contents/Documentation/en";
+  }
+  if (platform === "win32") {
+    return "C:/Program Files/Unity/Hub/Editor/<version>/Editor/Data/Documentation/en";
+  }
+  return path.join(os.homedir(), "Unity", "Hub", "Editor", "<version>", "Editor", "Data", "Documentation", "en");
+}
+
 function findAncestorUnityProjectSync(startDir?: string): string | undefined {
   if (!startDir) return undefined;
   let current = path.resolve(startDir);
@@ -430,7 +431,7 @@ export default function (pi: ExtensionAPI) {
       }
 
       if (!sourcePath) {
-        sourcePath = await ctx.ui.input("Unity documentation source directory", discoveredSources[0] || "C:/Program Files/Unity/Hub/Editor/<version>/Editor/Data/Documentation/en") ?? "";
+        sourcePath = await ctx.ui.input("Unity documentation source directory", discoveredSources[0] || defaultUnityDocsSourceHint()) ?? "";
         if (!sourcePath) {
           ctx.ui.notify("Unity docs configuration cancelled.", "info");
           return;

@@ -4,3 +4,4 @@ __pycache__/
 *.sqlite-*
 node_modules/
 .git/
+.github/

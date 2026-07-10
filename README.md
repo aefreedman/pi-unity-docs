@@ -41,7 +41,9 @@ The command asks for:
 - Unity version label
 - whether to build immediately
 
-Non-interactive CLI:
+### Windows non-interactive CLI (Git Bash)
+
+For PowerShell, use `$env:LOCALAPPDATA` instead of `$LOCALAPPDATA`.
 
 ```bash
 python scripts/unity_docs_db.py configure \
@@ -53,6 +55,23 @@ python scripts/unity_docs_db.py configure \
 python scripts/unity_docs_db.py build \
   --source "C:/Program Files/Unity/Hub/Editor/6000.4.7f1/Editor/Data/Documentation/en" \
   --db-dir "$LOCALAPPDATA/pi/unity-docs/6000.4.7f1" \
+  --version 6000.4.7f1 \
+  --force \
+  --progress
+```
+
+### macOS non-interactive CLI
+
+```bash
+python3 scripts/unity_docs_db.py configure \
+  --source "/Applications/Unity/Hub/Editor/6000.4.7f1/Unity.app/Contents/Documentation/en" \
+  --db-dir "$HOME/.local/share/pi/unity-docs/6000.4.7f1" \
+  --version 6000.4.7f1 \
+  --yes
+
+python3 scripts/unity_docs_db.py build \
+  --source "/Applications/Unity/Hub/Editor/6000.4.7f1/Unity.app/Contents/Documentation/en" \
+  --db-dir "$HOME/.local/share/pi/unity-docs/6000.4.7f1" \
   --version 6000.4.7f1 \
   --force \
   --progress
@@ -71,8 +90,13 @@ The generated database is named `unity_docs.sqlite` inside the selected database
 Each Unity editor version should use its own database directory, for example:
 
 ```text
+# Windows
 %LOCALAPPDATA%/pi/unity-docs/6000.4.7f1
 %LOCALAPPDATA%/pi/unity-docs/6000.5.2f1
+
+# macOS/Linux
+~/.local/share/pi/unity-docs/6000.4.7f1
+~/.local/share/pi/unity-docs/6000.5.2f1
 ```
 
 `configure` and `build` record core Unity databases by version under `config.databases`. The most recently configured or built version becomes the global fallback `activeVersion`, but project-aware queries should prefer `--project <unity-project-path>` so the docs version is read from `ProjectSettings/ProjectVersion.txt`. All configured core Unity databases are also exposed as docsets named `unity-<version>` for explicit multi-version queries.
@@ -85,12 +109,12 @@ When an exact project patch version is not configured, project-aware queries fal
 
 Queries do not silently fall forward to a different minor line such as `6000.5.x`; pass an explicit `--docset`/`--docsets` selector if that is intentional. Results include `requestedVersion` and `versionMatch` metadata when a project/version selector is used.
 
-Examples:
+macOS/Linux examples (use `python` instead of `python3` on Windows unless `PI_UNITY_DOCS_PYTHON` selects another interpreter):
 
 ```bash
-python scripts/unity_docs_db.py search "Physics.Raycast" --project "C:/path/to/UnityProject"
-python scripts/unity_docs_db.py search "Physics.Raycast" --docset unity-6000.4.7f1
-python scripts/unity_docs_db.py search "Physics.Raycast" --docsets unity-6000.4.7f1,input-system
+python3 scripts/unity_docs_db.py search "Physics.Raycast" --project "/path/to/UnityProject"
+python3 scripts/unity_docs_db.py search "Physics.Raycast" --docset unity-6000.4.7f1
+python3 scripts/unity_docs_db.py search "Physics.Raycast" --docsets unity-6000.4.7f1,input-system
 ```
 
 ## Tools exposed to pi
@@ -105,18 +129,20 @@ python scripts/unity_docs_db.py search "Physics.Raycast" --docsets unity-6000.4.
 
 ## Direct CLI usage
 
+The examples below use `python3` for macOS/Linux. On Windows, use `python` or the interpreter configured by `PI_UNITY_DOCS_PYTHON`.
+
 ```bash
-python scripts/unity_docs_db.py info
-python scripts/unity_docs_db.py build --source "<Unity Documentation/en>" --db-dir "<db-dir>" --force --progress
-python scripts/unity_docs_db.py search "Physics.Raycast layerMask trigger" --limit 8
-python scripts/unity_docs_db.py symbol "UnityEngine.Physics.Raycast"
-python scripts/unity_docs_db.py show "ScriptReference/Physics.Raycast" --sections Declaration,Parameters,Returns,Description --max-chars 6000
+python3 scripts/unity_docs_db.py info
+python3 scripts/unity_docs_db.py build --source "<Unity Documentation/en>" --db-dir "<db-dir>" --force --progress
+python3 scripts/unity_docs_db.py search "Physics.Raycast layerMask trigger" --limit 8
+python3 scripts/unity_docs_db.py symbol "UnityEngine.Physics.Raycast"
+python3 scripts/unity_docs_db.py show "ScriptReference/Physics.Raycast" --sections Declaration,Parameters,Returns,Description --max-chars 6000
 ```
 
 Build a package docset from an explicit package docs source:
 
 ```bash
-python scripts/unity_docs_db.py build-docset \
+python3 scripts/unity_docs_db.py build-docset \
   --source "<package-root-or-Documentation~>" \
   --db-dir "<docset-db-dir>" \
   --docset-id "<docset-id>" \
@@ -126,7 +152,7 @@ python scripts/unity_docs_db.py build-docset \
 Build a package docset from a Unity project's embedded packages or package cache:
 
 ```bash
-python scripts/unity_docs_db.py build-docset \
+python3 scripts/unity_docs_db.py build-docset \
   --project "<unity-project-path>" \
   --package-name "<package-name>" \
   --db-dir "<docset-db-dir>" \
@@ -136,7 +162,7 @@ python scripts/unity_docs_db.py build-docset \
 Build from external documentation formats without keeping staged files in the package repo:
 
 ```bash
-python scripts/unity_docs_db.py build-docset \
+python3 scripts/unity_docs_db.py build-docset \
   --docset-id "<docset-id>" \
   --package-name "<package-name>" \
   --gitbook-llms-url "<https://example.com/docs/llms.txt>" \
@@ -144,7 +170,7 @@ python scripts/unity_docs_db.py build-docset \
   --db-dir "<docset-db-dir>" \
   --force
 
-python scripts/unity_docs_db.py build-docset \
+python3 scripts/unity_docs_db.py build-docset \
   --docset-id "<docset-id>" \
   --package-name "<package-name>" \
   --html-url "<https://example.com/documentation.html>" \
@@ -157,7 +183,7 @@ python scripts/unity_docs_db.py build-docset \
 Run representative validation queries across configured docsets:
 
 ```bash
-python scripts/unity_docs_db.py validate --json
+python3 scripts/unity_docs_db.py validate --json
 ```
 
 For project package resolution, embedded packages are checked before `Library/PackageCache`. If `Packages/packages-lock.json` contains a resolved version, that version is preferred before falling back to matching package-cache folders.
@@ -166,6 +192,6 @@ Add `--json` to query commands for machine-readable output. Build progress is em
 
 ## Notes
 
-- Requires Python 3.10+ and SQLite with FTS5 enabled. No third-party Python packages are required.
+- Requires Python 3.10+ and SQLite with FTS5 enabled. No third-party Python packages are required. The pi extension uses `python` on Windows and `python3` on macOS/Linux; set `PI_UNITY_DOCS_PYTHON` to override the interpreter.
 - Build time depends on disk speed. ScriptReference contains tens of thousands of pages.
 - The database can be deleted at any time and rebuilt from the Unity install.

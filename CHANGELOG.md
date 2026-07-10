@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 - 2026-07-09
 
 ### Added
 
@@ -9,8 +9,12 @@
 
 ### Changed
 
+- Selected `python3` by default on macOS/Linux while retaining `python` on Windows and the `PI_UNITY_DOCS_PYTHON` override.
 - Improved Unity docs setup to select among discovered documentation sources and default database directories by Unity version.
 - Included version-match metadata in search, symbol, and page output when project-aware fallback selection is used.
+- Bound Python tool timeouts with SIGTERM/SIGKILL escalation and cleanup.
+- Added macOS CI coverage using Python 3 for tests and package validation.
+- Made direct CLI examples and interactive source-path hints platform-appropriate on macOS, Windows, and Linux.
 
 ## 0.3.0 - 2026-06-27
 
