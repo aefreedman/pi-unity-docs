@@ -48,6 +48,8 @@ When answering for a specific Unity project, pass `projectPath` when available. 
 
 Package/plugin docs configured as separate docsets are searched with the active docs profile by default. If a question mentions a package/plugin by name (for example Shapes, Odin, DOTween, Input System, UI Test Framework), call `unity_docs_info()` when you are unsure which docsets are configured, then search the relevant docset explicitly with `docset` or `docsets` if broad search results do not surface it. Use `docset`/`docsets` filters to narrow results, disambiguate a `unity_docs_show` call, or verify that a package docset such as `shapes` is actually being searched.
 
+Treat the standalone Unity CLI and the `com.unity.pipeline` package as separate documentation surfaces. Prefer the `unity-cli` docset for installation, top-level CLI commands, migration, and release notes; prefer a versioned Pipeline package docset for connected-Editor commands such as `recompile`, `run_tests`, and `eval`. Installed CLI `--help` and live `unity list --project-path <exact-project-copy>` remain authoritative when experimental documentation and the local binary differ.
+
 ## Building the cache
 
 Only build or rebuild when the user asks, or when `unity_docs_info` shows the cache is missing and the user approves.

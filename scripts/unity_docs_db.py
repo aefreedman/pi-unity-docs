@@ -693,34 +693,42 @@ def split_markdown_by_heading(markdown: str, split_level: int) -> list[tuple[str
     return chunks
 
 
-def stage_gitbook_llms(llms_url: str, section: str | None, docs_dir: Path, limit: int | None = None) -> int:
+def stage_llms_manifest(llms_url: str, section: str | None, docs_dir: Path, limit: int | None = None) -> int:
     llms = fetch_text_url(llms_url)
     content = llms
     if section:
         pattern = rf"(?ms)^##\s+{re.escape(section)}\s*(.*?)(?=^##\s+|\Z)"
         match = re.search(pattern, llms)
         if not match:
-            raise SystemExit(f"Could not find GitBook llms.txt section: {section}")
+            raise SystemExit(f"Could not find llms.txt section: {section}")
         content = match.group(1)
     urls: list[str] = []
     seen: set[str] = set()
-    for url in re.findall(r"https?://[^)\s]+?\.md", content):
-        url = url.rstrip("\\")
+    link_targets = re.findall(r"\]\(([^)\s]+)\)", content)
+    link_targets.extend(re.findall(r"https?://[^)\s]+", content))
+    for target in link_targets:
+        url = urllib.parse.urljoin(llms_url, target.strip("<>"))
+        if not urllib.parse.urlparse(url).path.lower().endswith(".md"):
+            continue
         if url not in seen:
             seen.add(url)
             urls.append(url)
     if limit is not None:
         urls = urls[:limit]
     base_path = urllib.parse.urlparse(llms_url).path.rsplit("/", 1)[0].strip("/")
-    for url in urls:
+    for index, url in enumerate(urls, 1):
         parsed = urllib.parse.urlparse(url)
         rel = parsed.path.strip("/")
         if base_path and rel.startswith(base_path + "/"):
             rel = rel[len(base_path) + 1:]
-        target = docs_dir / urllib.parse.unquote(rel)
+        target = docs_dir / f"{index:03d}-{safe_slug(urllib.parse.unquote(rel))}.md"
         target.parent.mkdir(parents=True, exist_ok=True)
         text = fetch_text_url(url)
         text = re.split(r"(?m)^---\s*\n\s*# Agent Instructions\s*$", text, maxsplit=1)[0].rstrip() + "\n"
+        raw_lines = text.splitlines()
+        frontmatter, _body_lines = parse_frontmatter(raw_lines)
+        if markdown_source_url(raw_lines, frontmatter) is None:
+            text = f"<!-- Source: {url} -->\n\n{text}"
         target.write_text(text, encoding="utf-8")
     return len(urls)
 
@@ -1915,11 +1923,13 @@ def info_db(args: argparse.Namespace) -> dict[str, Any]:
         db_path_value = docset.get("dbPath")
         source_path_value = docset.get("sourcePath")
         docset_db = Path(db_path_value).expanduser() if db_path_value else None
-        docset_source = Path(source_path_value).expanduser() if source_path_value else None
+        source_is_remote = bool(source_path_value and str(source_path_value).startswith(("http://", "https://")))
+        docset_source = Path(source_path_value).expanduser() if source_path_value and not source_is_remote else None
         status: dict[str, Any] = {
             **docset,
             "dbExists": bool(docset_db and docset_db.exists()),
-            "sourceExists": bool(docset_source and docset_source.exists()),
+            "sourceExists": None if source_is_remote else bool(docset_source and docset_source.exists()),
+            "sourceRemote": source_is_remote,
         }
         if docset_db and docset_db.exists():
             status["metadata"] = read_db_metadata(docset_db)
@@ -2049,6 +2059,14 @@ DEFAULT_VALIDATION_QUERIES: dict[str, list[dict[str, Any]]] = {
         {"kind": "symbol", "query": "ShowIfAttribute", "expect": ["ShowIfAttribute"]},
         {"kind": "search", "query": "custom value drawer", "expect": ["Value Drawer"]},
     ],
+    "unity-cli": [
+        {"kind": "search", "query": "install modules editor", "expect": ["install", "modules"]},
+        {"kind": "search", "query": "exit code 130 cancellation", "expect": ["130"]},
+    ],
+    "unity-pipeline": [
+        {"kind": "search", "query": "recompile status domain reload", "expect": ["recompile", "status"]},
+        {"kind": "search", "query": "run_tests async_tests test_status", "expect": ["run_tests", "test"]},
+    ],
 }
 
 
@@ -2058,6 +2076,8 @@ def validation_queries_for_docset(docset_id: str, docset: dict[str, Any]) -> lis
         return [item for item in configured if isinstance(item, dict) and item.get("query")]
     if docset_id in DEFAULT_VALIDATION_QUERIES:
         return DEFAULT_VALIDATION_QUERIES[docset_id]
+    if docset.get("packageName") == "com.unity.pipeline":
+        return DEFAULT_VALIDATION_QUERIES["unity-pipeline"]
     if docset.get("docsetKind") == "unity" or docset.get("kind") == "unity":
         return DEFAULT_VALIDATION_QUERIES["unity"]
     return []
@@ -2119,12 +2139,14 @@ def cmd_info(args: argparse.Namespace) -> None:
 
 
 def cmd_build_docset(args: argparse.Namespace) -> None:
-    ingesting = bool(args.gitbook_llms_url or args.html_url or args.xml_doc)
+    llms_url = args.llms_url
+    llms_section = args.llms_section
+    ingesting = bool(llms_url or args.html_url or args.xml_doc)
     temp_dir_obj: tempfile.TemporaryDirectory[str] | None = None
     try:
         source_label: str | None = None
         if ingesting:
-            source_label = args.source or args.gitbook_llms_url or (args.html_url[0] if args.html_url else None) or (args.xml_doc[0] if args.xml_doc else None)
+            source_label = args.source or llms_url or (args.html_url[0] if args.html_url else None) or (args.xml_doc[0] if args.xml_doc else None)
             temp_dir_obj = tempfile.TemporaryDirectory(prefix="unity_docs_docset_stage_")
             stage_root = Path(temp_dir_obj.name)
             docs_source = stage_root / "Documentation~"
@@ -2138,8 +2160,8 @@ def cmd_build_docset(args: argparse.Namespace) -> None:
                 package_root = find_package_root(base_source)
                 metadata = load_package_metadata(package_root)
                 shutil.copytree(base_source, docs_source, dirs_exist_ok=True)
-            if args.gitbook_llms_url:
-                stage_gitbook_llms(args.gitbook_llms_url, args.gitbook_section, docs_source, args.limit)
+            if llms_url:
+                stage_llms_manifest(llms_url, llms_section, docs_source, args.limit)
             if args.html_url:
                 stage_html_urls(args.html_url, docs_source, args.html_split_level or 0, args.limit)
             if args.xml_doc:
@@ -2150,7 +2172,7 @@ def cmd_build_docset(args: argparse.Namespace) -> None:
                 "name": package_name,
                 "displayName": args.title or metadata.get("displayName") or package_name,
                 "version": package_version,
-                "documentationUrl": args.gitbook_llms_url or (args.html_url[0] if args.html_url else metadata.get("documentationUrl")),
+                "documentationUrl": llms_url or (args.html_url[0] if args.html_url else metadata.get("documentationUrl")),
             }
             (stage_root / "package.json").write_text(json.dumps(package_json, indent=2), encoding="utf-8")
         else:
@@ -2176,11 +2198,17 @@ def cmd_build_docset(args: argparse.Namespace) -> None:
             source_kind=source_kind,
             project_path=project_path,
         )
+        if ingesting and source_label:
+            result["sourcePath"] = source_label
+            if source_label.startswith(("http://", "https://")):
+                result["sourceUrl"] = source_label
         if ingesting and not args.no_config and source_label:
             config = load_config()
             docset_config = (config.get("docsets") or {}).get(docset_id)
             if isinstance(docset_config, dict):
                 docset_config["sourcePath"] = source_label
+                if source_label.startswith(("http://", "https://")):
+                    docset_config["sourceUrl"] = source_label
                 save_config(config)
         print_json_or_text(result, args.json)
     finally:
@@ -2232,8 +2260,12 @@ def build_parser() -> argparse.ArgumentParser:
     build_docset.add_argument("--limit", type=int, help="Debug: only process this many Markdown pages.")
     build_docset.add_argument("--no-config", action="store_true", help="Do not update ~/.pi/unity-docs/config.json after building.")
     build_docset.add_argument("--progress", action="store_true", help="Emit progress JSON lines to stderr while building.")
-    build_docset.add_argument("--gitbook-llms-url", help="GitBook llms.txt URL to mirror into a temporary Markdown docset source before building.")
-    build_docset.add_argument("--gitbook-section", help="Optional GitBook llms.txt section heading to mirror, for example '3.X (EN)'.")
+    llms_url_group = build_docset.add_mutually_exclusive_group()
+    llms_url_group.add_argument("--llms-url", dest="llms_url", help="llms.txt URL to mirror into a temporary Markdown docset source before building.")
+    llms_url_group.add_argument("--gitbook-llms-url", dest="llms_url", help="Compatibility alias for --llms-url.")
+    llms_section_group = build_docset.add_mutually_exclusive_group()
+    llms_section_group.add_argument("--llms-section", dest="llms_section", help="Optional llms.txt section heading to mirror.")
+    llms_section_group.add_argument("--gitbook-section", dest="llms_section", help="Compatibility alias for --llms-section.")
     build_docset.add_argument("--html-url", action="append", help="Public HTML documentation URL to convert to Markdown before building. May be passed multiple times.")
     build_docset.add_argument("--html-split-level", type=int, choices=range(1, 7), metavar="1-6", help="Split converted HTML pages into Markdown pages at this heading level.")
     build_docset.add_argument("--xml-doc", action="append", help="C# XML documentation file to convert to Markdown API pages before building. May be passed multiple times.")

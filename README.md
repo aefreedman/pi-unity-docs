@@ -124,7 +124,7 @@ python3 scripts/unity_docs_db.py search "Physics.Raycast" --docsets unity-6000.4
 - `unity_docs_symbol` — exact/near-exact API symbol lookup.
 - `unity_docs_show` — retrieve compact page sections.
 - `unity_docs_build_database` — build/rebuild the core Unity docs cache when explicitly requested.
-- `unity_docs_build_docset` — build/rebuild a package/plugin docset from `Documentation~`, GitBook `llms.txt`, public HTML pages, or C# XML docs when explicitly requested.
+- `unity_docs_build_docset` — build/rebuild a package/plugin docset from `Documentation~`, a generic `llms.txt` manifest, public HTML pages, or C# XML docs when explicitly requested.
 - `unity_docs_validate` — run representative validation queries across configured docsets.
 
 ## Direct CLI usage
@@ -165,8 +165,8 @@ Build from external documentation formats without keeping staged files in the pa
 python3 scripts/unity_docs_db.py build-docset \
   --docset-id "<docset-id>" \
   --package-name "<package-name>" \
-  --gitbook-llms-url "<https://example.com/docs/llms.txt>" \
-  --gitbook-section "<section heading>" \
+  --llms-url "<https://example.com/docs/llms.txt>" \
+  --llms-section "<section heading>" \
   --db-dir "<docset-db-dir>" \
   --force
 
@@ -177,6 +177,30 @@ python3 scripts/unity_docs_db.py build-docset \
   --html-split-level 2 \
   --xml-doc "<path-to-csharp-xml-docs>" \
   --db-dir "<docset-db-dir>" \
+  --force
+```
+
+Build the rolling Unity CLI documentation from Unity's published Markdown manifest:
+
+```bash
+python3 scripts/unity_docs_db.py build-docset \
+  --docset-id unity-cli \
+  --package-name unity-cli \
+  --title "Unity CLI" \
+  --llms-url "https://docs.unity.com/en-us/unity-cli/llms.txt" \
+  --db-dir "<unity-cli-docset-db-dir>" \
+  --force
+```
+
+The manifest currently includes the CLI introduction, use guide, reference, and release notes. Pipeline command contracts should be indexed separately from an installed `com.unity.pipeline` package's `Documentation~` directory so their package version remains explicit:
+
+```bash
+python3 scripts/unity_docs_db.py build-docset \
+  --project "<unity-project-with-pipeline-installed>" \
+  --package-name com.unity.pipeline \
+  --docset-id "unity-pipeline-<package-version>" \
+  --title "Unity Pipeline <package-version>" \
+  --db-dir "<unity-pipeline-docset-db-dir>" \
   --force
 ```
 

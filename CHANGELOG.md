@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Added generic `llms.txt` manifest inputs and a documented Unity CLI docset recipe while retaining the GitBook-named options as compatibility aliases.
+- Added retrieval guidance that separates standalone Unity CLI documentation from versioned `com.unity.pipeline` command documentation.
+- Added default validation queries for the `unity-cli` docset and versioned `com.unity.pipeline` package docsets.
+
+### Fixed
+
+- Preserve source-page URLs for Markdown downloaded through an `llms.txt` manifest and report remote docset sources without applying local filesystem existence semantics.
+
 ## 0.4.0 - 2026-07-09
 
 ### Added

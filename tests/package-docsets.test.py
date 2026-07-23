@@ -3,11 +3,33 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
+from contextlib import contextmanager
+from functools import partial
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "unity_docs_db.py"
 INDEX_TS = ROOT / "index.ts"
+
+
+class QuietHttpHandler(SimpleHTTPRequestHandler):
+    def log_message(self, _format, *_args):
+        pass
+
+
+@contextmanager
+def serve_directory(root: Path):
+    server = ThreadingHTTPServer(("127.0.0.1", 0), partial(QuietHttpHandler, directory=str(root)))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
 
 
 def run(args, home):
@@ -184,6 +206,57 @@ def main():
         staged_symbol = run(["symbol", "DOMove", "--db-dir", str(staged_db_dir), "--limit", "5"], home)
         assert staged_symbol and "DOMove" in staged_symbol[0]["fullName"]
         assert staged_symbol[0].get("sourceUrl") == xml_source.resolve().as_uri()
+
+        llms_root = tmp_path / "llms-source"
+        llms_root.mkdir()
+        (llms_root / "reference.md").write_text("""# Unity CLI Reference
+
+## Install modules
+
+Install modules for an existing Editor.
+
+## Exit codes
+
+Exit code 130 means user cancellation.
+""", encoding="utf-8")
+        llms_db_dir = tmp_path / "db-llms"
+        with serve_directory(llms_root) as base_url:
+            llms_url = f"{base_url}/llms.txt"
+            reference_url = f"{base_url}/reference.md?format=raw"
+            (llms_root / "llms.txt").write_text("# Unity CLI\n\n- [Reference](./reference.md?format=raw)\n", encoding="utf-8")
+            llms_built = run([
+                "build-docset",
+                "--docset-id", "unity-cli",
+                "--package-name", "unity-cli",
+                "--title", "Unity CLI",
+                "--llms-url", llms_url,
+                "--db-dir", str(llms_db_dir),
+                "--force",
+            ], home)
+            assert llms_built["pages"] == 1
+            assert llms_built["sourcePath"] == llms_url
+            assert llms_built["sourceUrl"] == llms_url
+            llms_search = run(["search", "exit code 130 cancellation", "--docset", "unity-cli", "--limit", "5"], home)
+            assert llms_search and llms_search[0].get("sourceUrl") == reference_url
+            llms_validation = run(["validate", "--docset", "unity-cli", "--limit", "5"], home)
+            assert llms_validation["total"] == 2
+            assert llms_validation["failed"] == 0
+            legacy_built = run([
+                "build-docset",
+                "--docset-id", "legacy-llms-alias",
+                "--package-name", "legacy-llms-alias",
+                "--gitbook-llms-url", llms_url,
+                "--db-dir", str(tmp_path / "db-legacy-llms"),
+                "--force",
+                "--no-config",
+            ], home)
+            assert legacy_built["pages"] == 1
+
+        info = run(["info"], home)
+        assert info["docsets"]["unity-cli"]["sourcePath"] == llms_url
+        assert info["docsets"]["unity-cli"]["sourceUrl"] == llms_url
+        assert info["docsets"]["unity-cli"]["sourceRemote"] is True
+        assert info["docsets"]["unity-cli"]["sourceExists"] is None
 
         validation = run(["validate", "--docset", "example-input", "--limit", "5"], home)
         assert validation["total"] == 0 or validation["failed"] == 0
