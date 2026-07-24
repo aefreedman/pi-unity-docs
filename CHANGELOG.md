@@ -1,5 +1,12 @@
 # Changelog
 
+
+## 0.5.1 - 2026-07-24
+
+### Changed
+
+- Marked Pi-bundled core dependencies as optional peers so Pi git installs do not create redundant per-package `node_modules` directories.
+
 ## 0.5.0 - 2026-07-23
 
 ### Added
