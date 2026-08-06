@@ -191,7 +191,7 @@ def main():
         ], home)
         assert staged["docsetId"] == "staged-docs"
         staged_search = run(["search", "DOMove SetEase", "--db-dir", str(staged_db_dir), "--limit", "5"], home)
-        assert staged_search and staged_search[0].get("sourceUrl") == html_source.as_uri()
+        assert staged_search and staged_search[0].get("sourceUrl") == html_source.resolve().as_uri()
         staged_symbol = run(["symbol", "DOMove", "--db-dir", str(staged_db_dir), "--limit", "5"], home)
         assert staged_symbol and "DOMove" in staged_symbol[0]["fullName"]
         assert staged_symbol[0].get("sourceUrl") == xml_source.resolve().as_uri()
