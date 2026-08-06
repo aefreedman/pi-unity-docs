@@ -14,17 +14,19 @@ The package can also build separate package/plugin documentation docsets from Un
 
 ## Install in pi
 
-From this checkout:
+From npm:
 
 ```bash
-pi install <path-to-pi-unity-docs>
+pi install npm:@aefree/pi-unity-docs
 ```
 
-Or run pi temporarily with:
+Or try it for one session:
 
 ```bash
-pi -e <path-to-pi-unity-docs>
+pi -e npm:@aefree/pi-unity-docs
 ```
+
+For local development, replace the npm spec with the path to this checkout.
 
 ## Configure and build
 
@@ -174,11 +176,14 @@ python3 scripts/unity_docs_db.py build-docset \
   --docset-id "<docset-id>" \
   --package-name "<package-name>" \
   --html-url "<https://example.com/documentation.html>" \
+  --html-file "<path-to-local-documentation.html>" \
   --html-split-level 2 \
   --xml-doc "<path-to-csharp-xml-docs>" \
   --db-dir "<docset-db-dir>" \
   --force
 ```
+
+Remote ingestion accepts HTTPS only, rejects credential-bearing URLs and non-public network destinations, limits each response to 10 MiB, and keeps links discovered in an `llms.txt` manifest on the manifest's origin. Use `--html-file` for intentional local HTML ingestion.
 
 Build the rolling Unity CLI documentation from Unity's published Markdown manifest:
 

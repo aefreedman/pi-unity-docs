@@ -647,7 +647,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "unity_docs_build_docset",
     label: "Unity Docs Build Docset",
-    description: "Build or rebuild a local SQLite documentation cache from package Documentation~, an llms.txt manifest, public HTML, or C# XML docs.",
+    description: "Build or rebuild a local SQLite documentation cache from package Documentation~, an llms.txt manifest, public HTTPS or local HTML, or C# XML docs.",
     promptSnippet: "Build or rebuild a Unity package or external documentation docset.",
     promptGuidelines: ["Use unity_docs_build_docset only when the user explicitly asks to build or rebuild package/plugin documentation."],
     parameters: Type.Object({
@@ -661,8 +661,9 @@ export default function (pi: ExtensionAPI) {
       llmsSection: Type.Optional(Type.String({ description: "Optional llms.txt section heading to mirror." })),
       gitbookLlmsUrl: Type.Optional(Type.String({ description: "Compatibility alias for llmsUrl." })),
       gitbookSection: Type.Optional(Type.String({ description: "Compatibility alias for llmsSection." })),
-      htmlUrls: Type.Optional(Type.Array(Type.String(), { description: "Public HTML documentation URLs to convert to Markdown before building." })),
-      htmlSplitLevel: Type.Optional(Type.Integer({ minimum: 1, maximum: 6, description: "Split converted HTML pages into Markdown pages at this heading level." })),
+      htmlUrls: Type.Optional(Type.Array(Type.String(), { description: "Public HTTPS documentation URLs to convert to Markdown before building." })),
+      htmlFiles: Type.Optional(Type.Array(Type.String(), { description: "Local HTML documentation files to convert to Markdown before building." })),
+      htmlSplitLevel: Type.Optional(Type.Integer({ minimum: 1, maximum: 6, description: "Split converted HTML pages or files into Markdown pages at this heading level." })),
       xmlDocs: Type.Optional(Type.Array(Type.String(), { description: "C# XML documentation files to convert to Markdown API pages before building." })),
       dbDir: Type.String({ description: "Directory where unity_docs.sqlite should be installed." }),
       force: Type.Optional(Type.Boolean({ default: false, description: "Replace an existing database." })),
@@ -689,6 +690,7 @@ export default function (pi: ExtensionAPI) {
       if (llmsUrl) args.push("--llms-url", llmsUrl);
       if (llmsSection) args.push("--llms-section", llmsSection);
       for (const url of params.htmlUrls ?? []) args.push("--html-url", url);
+      for (const file of params.htmlFiles ?? []) args.push("--html-file", file);
       if (params.htmlSplitLevel) args.push("--html-split-level", String(params.htmlSplitLevel));
       for (const xmlDoc of params.xmlDocs ?? []) args.push("--xml-doc", xmlDoc);
       if (params.force) args.push("--force");

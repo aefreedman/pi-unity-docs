@@ -1,0 +1,71 @@
+name: npm release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: npm-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.14.0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Use an npm version that supports trusted publishing
+        run: npm install --global "npm@^11.5.1"
+
+      - name: Verify release identity
+        id: identity
+        run: |
+          node -e "const p = require('./package.json'); const expected = 'v' + p.version; if (process.env.GITHUB_REF_NAME !== expected) { console.error('Tag ' + process.env.GITHUB_REF_NAME + ' does not match package version ' + p.version); process.exit(1); }"
+          echo "package=$(node -p 'require("./package.json").name')" >> "$GITHUB_OUTPUT"
+          echo "version=$(node -p 'require("./package.json").version')" >> "$GITHUB_OUTPUT"
+
+      - name: Reconcile npm release identity
+        id: registry
+        env:
+          PACKAGE_NAME: ${{ steps.identity.outputs.package }}
+          PACKAGE_VERSION: ${{ steps.identity.outputs.version }}
+        run: |
+          if npm view "$PACKAGE_NAME@$PACKAGE_VERSION" version gitHead --json > npm-metadata.json 2> npm-view-error.log; then
+            node -e "const fs = require('node:fs'); const m = JSON.parse(fs.readFileSync('npm-metadata.json', 'utf8')); if (m.version !== process.env.PACKAGE_VERSION || m.gitHead !== process.env.GITHUB_SHA) { console.error('Existing npm release does not match this tag and commit:', m); process.exit(1); }"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "The matching npm release already exists; publication will be skipped."
+          elif grep -q "E404" npm-view-error.log; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "The npm version does not exist and will be published."
+          else
+            cat npm-view-error.log >&2
+            exit 1
+          fi
+          rm -f npm-metadata.json npm-view-error.log
+
+      - name: Install package dependencies
+        run: npm install --ignore-scripts --no-audit --no-fund
+
+      - name: Test
+        run: npm test
+
+      - name: Review package construction
+        run: npm pack --dry-run
+
+      - name: Publish to npm
+        if: steps.registry.outputs.publish == 'true'
+        run: npm publish

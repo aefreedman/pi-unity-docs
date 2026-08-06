@@ -1,35 +1,24 @@
+import importlib.util
 import json
 import os
 import subprocess
 import sys
 import tempfile
-import threading
-from contextlib import contextmanager
-from functools import partial
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "unity_docs_db.py"
 INDEX_TS = ROOT / "index.ts"
 
 
-class QuietHttpHandler(SimpleHTTPRequestHandler):
-    def log_message(self, _format, *_args):
-        pass
-
-
-@contextmanager
-def serve_directory(root: Path):
-    server = ThreadingHTTPServer(("127.0.0.1", 0), partial(QuietHttpHandler, directory=str(root)))
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield f"http://127.0.0.1:{server.server_port}"
-    finally:
-        server.shutdown()
-        thread.join(timeout=5)
-        server.server_close()
+def load_script_module():
+    spec = importlib.util.spec_from_file_location("unity_docs_db", SCRIPT)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def run(args, home):
@@ -194,7 +183,7 @@ def main():
             "build-docset",
             "--docset-id", "staged-docs",
             "--package-name", "com.example.staged",
-            "--html-url", html_source.as_uri(),
+            "--html-file", str(html_source),
             "--html-split-level", "2",
             "--xml-doc", str(xml_source),
             "--db-dir", str(staged_db_dir),
@@ -207,9 +196,14 @@ def main():
         assert staged_symbol and "DOMove" in staged_symbol[0]["fullName"]
         assert staged_symbol[0].get("sourceUrl") == xml_source.resolve().as_uri()
 
-        llms_root = tmp_path / "llms-source"
-        llms_root.mkdir()
-        (llms_root / "reference.md").write_text("""# Unity CLI Reference
+        module = load_script_module()
+        llms_url = "https://docs.example.com/llms.txt"
+        reference_url = "https://docs.example.com/reference.md?format=raw"
+        staged_llms = tmp_path / "llms-staged"
+        staged_llms.mkdir()
+        remote_content = {
+            llms_url: "# Unity CLI\n\n- [Reference](./reference.md?format=raw)\n",
+            reference_url: """# Unity CLI Reference
 
 ## Install modules
 
@@ -218,45 +212,44 @@ Install modules for an existing Editor.
 ## Exit codes
 
 Exit code 130 means user cancellation.
-""", encoding="utf-8")
-        llms_db_dir = tmp_path / "db-llms"
-        with serve_directory(llms_root) as base_url:
-            llms_url = f"{base_url}/llms.txt"
-            reference_url = f"{base_url}/reference.md?format=raw"
-            (llms_root / "llms.txt").write_text("# Unity CLI\n\n- [Reference](./reference.md?format=raw)\n", encoding="utf-8")
-            llms_built = run([
-                "build-docset",
-                "--docset-id", "unity-cli",
-                "--package-name", "unity-cli",
-                "--title", "Unity CLI",
-                "--llms-url", llms_url,
-                "--db-dir", str(llms_db_dir),
-                "--force",
-            ], home)
-            assert llms_built["pages"] == 1
-            assert llms_built["sourcePath"] == llms_url
-            assert llms_built["sourceUrl"] == llms_url
-            llms_search = run(["search", "exit code 130 cancellation", "--docset", "unity-cli", "--limit", "5"], home)
-            assert llms_search and llms_search[0].get("sourceUrl") == reference_url
-            llms_validation = run(["validate", "--docset", "unity-cli", "--limit", "5"], home)
-            assert llms_validation["total"] == 2
-            assert llms_validation["failed"] == 0
-            legacy_built = run([
-                "build-docset",
-                "--docset-id", "legacy-llms-alias",
-                "--package-name", "legacy-llms-alias",
-                "--gitbook-llms-url", llms_url,
-                "--db-dir", str(tmp_path / "db-legacy-llms"),
-                "--force",
-                "--no-config",
-            ], home)
-            assert legacy_built["pages"] == 1
+""",
+        }
+        public_resolution = [(None, None, None, None, ("93.184.216.34", 443))]
+        with patch.object(module.socket, "getaddrinfo", return_value=public_resolution), \
+             patch.object(module, "fetch_text_url", side_effect=lambda url, _origin=None: remote_content[url]):
+            assert module.stage_llms_manifest(llms_url, None, staged_llms) == 1
+        staged_reference = next(staged_llms.glob("*.md"))
+        assert "Exit code 130" in staged_reference.read_text(encoding="utf-8")
+        assert f"<!-- Source: {reference_url} -->" in staged_reference.read_text(encoding="utf-8")
 
-        info = run(["info"], home)
-        assert info["docsets"]["unity-cli"]["sourcePath"] == llms_url
-        assert info["docsets"]["unity-cli"]["sourceUrl"] == llms_url
-        assert info["docsets"]["unity-cli"]["sourceRemote"] is True
-        assert info["docsets"]["unity-cli"]["sourceExists"] is None
+        parser = module.build_parser()
+        alias_args = parser.parse_args(["build-docset", "--gitbook-llms-url", llms_url, "--db-dir", str(tmp_path / "alias-db")])
+        assert alias_args.llms_url == llms_url
+        for unsafe_url in [
+            "file:///tmp/private.md",
+            "http://docs.example.com/reference.md",
+            "https://user:password@docs.example.com/reference.md",
+        ]:
+            try:
+                module.validate_remote_url(unsafe_url)
+            except SystemExit:
+                pass
+            else:
+                raise AssertionError(f"expected unsafe URL to be rejected: {unsafe_url}")
+        with patch.object(module.socket, "getaddrinfo", return_value=[(None, None, None, None, ("127.0.0.1", 443))]):
+            try:
+                module.validate_remote_url("https://docs.example.com/reference.md")
+            except SystemExit:
+                pass
+            else:
+                raise AssertionError("expected loopback resolution to be rejected")
+        with patch.object(module.socket, "getaddrinfo", return_value=public_resolution):
+            try:
+                module.validate_remote_url("https://cdn.example.com/reference.md", module.remote_origin(llms_url))
+            except SystemExit:
+                pass
+            else:
+                raise AssertionError("expected cross-origin manifest URL to be rejected")
 
         validation = run(["validate", "--docset", "example-input", "--limit", "5"], home)
         assert validation["total"] == 0 or validation["failed"] == 0

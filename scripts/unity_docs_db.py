@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import argparse
 import html
+import ipaddress
 import json
 import os
 import re
 import shutil
+import socket
 import sqlite3
 import sys
 import tempfile
@@ -35,6 +37,7 @@ if hasattr(sys.stderr, "reconfigure"):
 
 DB_FILENAME = "unity_docs.sqlite"
 CONFIG_PATH = Path.home() / ".pi" / "unity-docs" / "config.json"
+MAX_REMOTE_DOCUMENT_BYTES = 10 * 1024 * 1024
 SKIP_CLASSES = {
     "breadcrumbs",
     "nextprev",
@@ -635,10 +638,64 @@ def validate_package_source(source: Path) -> None:
         raise SystemExit(f"Package documentation source contains no Markdown files: {source}")
 
 
-def fetch_text_url(url: str) -> str:
+def remote_origin(url: str) -> tuple[str, str, int]:
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme.lower() != "https":
+        raise SystemExit(f"Remote documentation URLs must use HTTPS: {url}")
+    if parsed.username is not None or parsed.password is not None:
+        raise SystemExit(f"Remote documentation URLs must not contain credentials: {url}")
+    if not parsed.hostname:
+        raise SystemExit(f"Remote documentation URL has no hostname: {url}")
+    try:
+        port = parsed.port or 443
+    except ValueError as error:
+        raise SystemExit(f"Remote documentation URL has an invalid port: {url}") from error
+    return parsed.scheme.lower(), parsed.hostname.lower().rstrip("."), port
+
+
+def validate_remote_url(url: str, allowed_origin: tuple[str, str, int] | None = None) -> tuple[str, str, int]:
+    origin = remote_origin(url)
+    if allowed_origin is not None and origin != allowed_origin:
+        raise SystemExit(f"llms.txt links must stay on the manifest origin: {url}")
+    try:
+        addresses = socket.getaddrinfo(origin[1], origin[2], type=socket.SOCK_STREAM)
+    except socket.gaierror as error:
+        raise SystemExit(f"Could not resolve remote documentation host {origin[1]}: {error}") from error
+    if not addresses:
+        raise SystemExit(f"Remote documentation host resolved to no addresses: {origin[1]}")
+    for address in addresses:
+        ip = ipaddress.ip_address(address[4][0].split("%", 1)[0])
+        if not ip.is_global:
+            raise SystemExit(f"Remote documentation URL resolves to a non-public address ({ip}): {url}")
+    return origin
+
+
+class SafeDocumentationRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def __init__(self, allowed_origin: tuple[str, str, int] | None = None):
+        super().__init__()
+        self.allowed_origin = allowed_origin
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        validate_remote_url(newurl, self.allowed_origin)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def fetch_text_url(url: str, allowed_origin: tuple[str, str, int] | None = None) -> str:
+    validate_remote_url(url, allowed_origin)
     request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (pi-unity-docs)"})
-    with urllib.request.urlopen(request, timeout=45) as response:
-        return response.read().decode("utf-8", errors="replace")
+    opener = urllib.request.build_opener(SafeDocumentationRedirectHandler(allowed_origin))
+    with opener.open(request, timeout=45) as response:
+        content_length = response.headers.get("Content-Length")
+        if content_length:
+            try:
+                if int(content_length) > MAX_REMOTE_DOCUMENT_BYTES:
+                    raise SystemExit(f"Remote documentation response exceeds {MAX_REMOTE_DOCUMENT_BYTES} bytes: {url}")
+            except ValueError:
+                pass
+        payload = response.read(MAX_REMOTE_DOCUMENT_BYTES + 1)
+        if len(payload) > MAX_REMOTE_DOCUMENT_BYTES:
+            raise SystemExit(f"Remote documentation response exceeds {MAX_REMOTE_DOCUMENT_BYTES} bytes: {url}")
+        return payload.decode("utf-8", errors="replace")
 
 
 def safe_slug(value: str) -> str:
@@ -694,7 +751,8 @@ def split_markdown_by_heading(markdown: str, split_level: int) -> list[tuple[str
 
 
 def stage_llms_manifest(llms_url: str, section: str | None, docs_dir: Path, limit: int | None = None) -> int:
-    llms = fetch_text_url(llms_url)
+    manifest_origin = validate_remote_url(llms_url)
+    llms = fetch_text_url(llms_url, manifest_origin)
     content = llms
     if section:
         pattern = rf"(?ms)^##\s+{re.escape(section)}\s*(.*?)(?=^##\s+|\Z)"
@@ -710,6 +768,7 @@ def stage_llms_manifest(llms_url: str, section: str | None, docs_dir: Path, limi
         url = urllib.parse.urljoin(llms_url, target.strip("<>"))
         if not urllib.parse.urlparse(url).path.lower().endswith(".md"):
             continue
+        validate_remote_url(url, manifest_origin)
         if url not in seen:
             seen.add(url)
             urls.append(url)
@@ -723,7 +782,7 @@ def stage_llms_manifest(llms_url: str, section: str | None, docs_dir: Path, limi
             rel = rel[len(base_path) + 1:]
         target = docs_dir / f"{index:03d}-{safe_slug(urllib.parse.unquote(rel))}.md"
         target.parent.mkdir(parents=True, exist_ok=True)
-        text = fetch_text_url(url)
+        text = fetch_text_url(url, manifest_origin)
         text = re.split(r"(?m)^---\s*\n\s*# Agent Instructions\s*$", text, maxsplit=1)[0].rstrip() + "\n"
         raw_lines = text.splitlines()
         frontmatter, _body_lines = parse_frontmatter(raw_lines)
@@ -733,15 +792,14 @@ def stage_llms_manifest(llms_url: str, section: str | None, docs_dir: Path, limi
     return len(urls)
 
 
-def stage_html_urls(urls: list[str], docs_dir: Path, split_level: int = 0, limit: int | None = None) -> int:
+def stage_html_documents(documents: list[tuple[str, str]], docs_dir: Path, split_level: int = 0) -> int:
     count = 0
-    for url in urls[:limit] if limit is not None else urls:
-        raw = fetch_text_url(url)
-        markdown = html_to_markdown(url, raw)
+    for source_url, raw in documents:
+        markdown = html_to_markdown(source_url, raw)
         if split_level:
             chunks = split_markdown_by_heading(markdown, split_level)
         else:
-            slug = safe_slug(urllib.parse.urlparse(url).path.strip("/") or "index").lower()
+            slug = safe_slug(urllib.parse.urlparse(source_url).path.strip("/") or "index").lower()
             chunks = [(slug, markdown)]
         for slug, text in chunks:
             target = docs_dir / f"{slug}.md"
@@ -749,6 +807,22 @@ def stage_html_urls(urls: list[str], docs_dir: Path, split_level: int = 0, limit
             target.write_text(text, encoding="utf-8")
             count += 1
     return count
+
+
+def stage_html_urls(urls: list[str], docs_dir: Path, split_level: int = 0, limit: int | None = None) -> int:
+    selected = urls[:limit] if limit is not None else urls
+    return stage_html_documents([(url, fetch_text_url(url)) for url in selected], docs_dir, split_level)
+
+
+def stage_html_files(paths: list[Path], docs_dir: Path, split_level: int = 0, limit: int | None = None) -> int:
+    selected = paths[:limit] if limit is not None else paths
+    documents: list[tuple[str, str]] = []
+    for path in selected:
+        source = path.expanduser().resolve()
+        if not source.is_file():
+            raise SystemExit(f"HTML documentation file does not exist: {source}")
+        documents.append((source.as_uri(), source.read_text(encoding="utf-8", errors="replace")))
+    return stage_html_documents(documents, docs_dir, split_level)
 
 
 def find_package_root(docs_source: Path) -> Path:
@@ -2141,12 +2215,12 @@ def cmd_info(args: argparse.Namespace) -> None:
 def cmd_build_docset(args: argparse.Namespace) -> None:
     llms_url = args.llms_url
     llms_section = args.llms_section
-    ingesting = bool(llms_url or args.html_url or args.xml_doc)
+    ingesting = bool(llms_url or args.html_url or args.html_file or args.xml_doc)
     temp_dir_obj: tempfile.TemporaryDirectory[str] | None = None
     try:
         source_label: str | None = None
         if ingesting:
-            source_label = args.source or llms_url or (args.html_url[0] if args.html_url else None) or (args.xml_doc[0] if args.xml_doc else None)
+            source_label = args.source or llms_url or (args.html_url[0] if args.html_url else None) or (args.html_file[0] if args.html_file else None) or (args.xml_doc[0] if args.xml_doc else None)
             temp_dir_obj = tempfile.TemporaryDirectory(prefix="unity_docs_docset_stage_")
             stage_root = Path(temp_dir_obj.name)
             docs_source = stage_root / "Documentation~"
@@ -2164,6 +2238,8 @@ def cmd_build_docset(args: argparse.Namespace) -> None:
                 stage_llms_manifest(llms_url, llms_section, docs_source, args.limit)
             if args.html_url:
                 stage_html_urls(args.html_url, docs_source, args.html_split_level or 0, args.limit)
+            if args.html_file:
+                stage_html_files([Path(path) for path in args.html_file], docs_source, args.html_split_level or 0, args.limit)
             if args.xml_doc:
                 stage_xml_docs([Path(path).expanduser() for path in args.xml_doc], docs_source)
             package_name = args.package_name or metadata.get("name") or args.docset_id or "package-docs"
@@ -2266,8 +2342,9 @@ def build_parser() -> argparse.ArgumentParser:
     llms_section_group = build_docset.add_mutually_exclusive_group()
     llms_section_group.add_argument("--llms-section", dest="llms_section", help="Optional llms.txt section heading to mirror.")
     llms_section_group.add_argument("--gitbook-section", dest="llms_section", help="Compatibility alias for --llms-section.")
-    build_docset.add_argument("--html-url", action="append", help="Public HTML documentation URL to convert to Markdown before building. May be passed multiple times.")
-    build_docset.add_argument("--html-split-level", type=int, choices=range(1, 7), metavar="1-6", help="Split converted HTML pages into Markdown pages at this heading level.")
+    build_docset.add_argument("--html-url", action="append", help="Public HTTPS documentation URL to convert to Markdown before building. May be passed multiple times.")
+    build_docset.add_argument("--html-file", action="append", help="Local HTML documentation file to convert to Markdown before building. May be passed multiple times.")
+    build_docset.add_argument("--html-split-level", type=int, choices=range(1, 7), metavar="1-6", help="Split converted HTML pages or files into Markdown pages at this heading level.")
     build_docset.add_argument("--xml-doc", action="append", help="C# XML documentation file to convert to Markdown API pages before building. May be passed multiple times.")
     build_docset.set_defaults(func=cmd_build_docset)
 

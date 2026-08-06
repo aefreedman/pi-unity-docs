@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.6.1 - 2026-08-05
+
+### Added
+
+- Added guarded tag-triggered trusted publishing with npm source-commit reconciliation.
+
+## 0.6.0 - 2026-08-05
+
+### Added
+
+- Added an explicit local HTML file input for package documentation docsets.
+- Added a tag-triggered npm trusted-publishing workflow for releases after the manual bootstrap publication.
+
+### Changed
+
+- Limited remote documentation ingestion to bounded public HTTPS sources and same-origin `llms.txt` links.
+- Reduced the npm artifact to runtime files and consumer documentation.
+- Added npm installation guidance and public package metadata.
 
 ## 0.5.1 - 2026-07-24
 

@@ -1,7 +1,6 @@
 {
   "name": "@aefree/pi-unity-docs",
-  "private": true,
-  "version": "0.5.1",
+  "version": "0.6.1",
   "type": "module",
   "description": "Pi tools and skills for fast, token-efficient retrieval from local Unity documentation.",
   "keywords": [
@@ -12,8 +11,22 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+ssh://git@github.com/aefreedman/pi-unity-docs.git"
+    "url": "git+https://github.com/aefreedman/pi-unity-docs.git"
   },
+  "homepage": "https://github.com/aefreedman/pi-unity-docs#readme",
+  "bugs": {
+    "url": "https://github.com/aefreedman/pi-unity-docs/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "index.ts",
+    "scripts/python-selector.mjs",
+    "scripts/supervised-process.mjs",
+    "scripts/unity_docs_db.py",
+    "skills/"
+  ],
   "pi": {
     "extensions": [
       "./index.ts"
