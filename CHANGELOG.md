@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Pin development validation dependencies to Pi 0.86.1 while retaining optional wildcard peers for Pi-provided runtime packages.
+
+### Fixed
+
+- Include JSON-compatible progress details in documentation build tool updates required by Pi 0.86.1.
+
 ## 0.6.1 - 2026-08-05
 
 ### Added

@@ -695,9 +695,9 @@ export default function (pi: ExtensionAPI) {
       for (const xmlDoc of params.xmlDocs ?? []) args.push("--xml-doc", xmlDoc);
       if (params.force) args.push("--force");
       if (params.limit) args.push("--limit", String(params.limit));
-      onUpdate?.({ content: [{ type: "text", text: "Building Unity package documentation docset..." }] });
+      onUpdate?.({ content: [{ type: "text", text: "Building Unity package documentation docset..." }], details: { phase: "building" } });
       const result = await runScript(args, 3_600_000, (message) => {
-        onUpdate?.({ content: [{ type: "text", text: message }] });
+        onUpdate?.({ content: [{ type: "text", text: message }], details: { phase: "building" } });
       });
       return {
         content: [{ type: "text", text: `Unity package documentation docset build complete.\n${JSON.stringify(result.json, null, 2)}` }],
@@ -730,9 +730,9 @@ export default function (pi: ExtensionAPI) {
       const args = ["--json", "build", "--source", params.sourcePath, "--db-dir", params.dbDir, "--version", version, "--progress"];
       if (params.force) args.push("--force");
       if (params.limit) args.push("--limit", String(params.limit));
-      onUpdate?.({ content: [{ type: "text", text: "Building Unity docs database. This can take several minutes..." }] });
+      onUpdate?.({ content: [{ type: "text", text: "Building Unity docs database. This can take several minutes..." }], details: { phase: "building" } });
       const result = await runScript(args, 3_600_000, (message) => {
-        onUpdate?.({ content: [{ type: "text", text: message }] });
+        onUpdate?.({ content: [{ type: "text", text: message }], details: { phase: "building" } });
       });
       return {
         content: [{ type: "text", text: `Unity docs database build complete.\n${JSON.stringify(result.json, null, 2)}` }],
