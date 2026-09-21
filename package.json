@@ -1,6 +1,6 @@
 {
   "name": "@aefree/pi-unity-docs",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "type": "module",
   "description": "Pi tools and skills for fast, token-efficient retrieval from local Unity documentation.",
   "keywords": [
@@ -55,8 +55,8 @@
     }
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "0.86.1",
-    "@earendil-works/pi-tui": "0.86.1",
+    "@earendil-works/pi-coding-agent": "0.87.0",
+    "@earendil-works/pi-tui": "0.87.0",
     "typebox": "1.3.27"
   }
 }
