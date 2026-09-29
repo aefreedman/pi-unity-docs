@@ -2,9 +2,13 @@
 
 ## Unreleased
 
-- require Node >=22.19.0 for the Pi runtime.
+## 0.6.4 - 2026-09-29
 
+### Changed
+
+- Require Node >=22.19.0 for the Pi runtime and release runner.
 - Align development and deterministic validation with Pi 0.99.1.
+- Use locked dependency installation for release validation.
 
 ## 0.6.3 - 2026-09-21
 

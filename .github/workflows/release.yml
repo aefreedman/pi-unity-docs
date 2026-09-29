@@ -22,7 +22,7 @@ jobs:
 
       - uses: actions/setup-node@v5
         with:
-          node-version: 22.14.0
+          node-version: 22.19.0
 
       - uses: actions/setup-python@v6
         with:
@@ -58,7 +58,7 @@ jobs:
           rm -f npm-metadata.json npm-view-error.log
 
       - name: Install package dependencies
-        run: npm install --ignore-scripts --no-audit --no-fund
+        run: npm ci --ignore-scripts --no-audit --no-fund
 
       - name: Test
         run: npm test
