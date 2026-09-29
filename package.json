@@ -2,6 +2,9 @@
   "name": "@aefree/pi-unity-docs",
   "version": "0.6.3",
   "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
   "description": "Pi tools and skills for fast, token-efficient retrieval from local Unity documentation.",
   "keywords": [
     "pi-package",

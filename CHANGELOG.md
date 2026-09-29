@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- require Node >=22.19.0 for the Pi runtime.
+
 - Align development and deterministic validation with Pi 0.99.1.
 
 ## 0.6.3 - 2026-09-21
