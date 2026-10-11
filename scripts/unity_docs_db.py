@@ -1734,15 +1734,23 @@ def resolve_query_docsets(args: argparse.Namespace) -> list[tuple[str, Path, dic
     requested_core_version = project_version or config.get("activeVersion")
     selected_core_version, selected_match_kind = resolve_configured_unity_version(requested_core_version, config.get("databases") or {})
     selected_core_id = sanitize_docset_id(f"unity-{selected_core_version}") if selected_core_version else ""
+    requested = split_docset_ids(getattr(args, "docsets", None))
+    if getattr(args, "docset", None):
+        requested.insert(0, args.docset)
+    explicit_requested = bool(requested)
+    if NATIVE_OBSERVATIONS and not explicit_requested:
+        explicit_profile = getattr(args, "profile", None)
+        active_profile = config.get("activeProfile")
+        profile_name = explicit_profile or active_profile or "default"
+        profiles = config.get("profiles") or {}
+        profile_intended = bool(explicit_profile or active_profile or (isinstance(profiles, dict) and profile_name in profiles))
+        if profile_intended and (not isinstance(profiles, dict) or not isinstance(profiles.get(profile_name), list)):
+            raise ValueError("unresolved_profile")
     if not docsets:
         db_path = resolve_db_path(args)
         docset = docset_from_db_metadata(db_path)
         return [(docset.get("docsetId") or "legacy", db_path, docset)]
 
-    requested = split_docset_ids(getattr(args, "docsets", None))
-    if getattr(args, "docset", None):
-        requested.insert(0, args.docset)
-    explicit_requested = bool(requested)
     if project_version and not explicit_requested and selected_core_id not in docsets:
         raise SystemExit(f"No Unity docs database is configured for project Unity {project_version}. Build that version, add a same-minor fallback (for example {project_version.rsplit('.', 1)[0]}.x), or pass an explicit --docset/--docsets selector.")
     if not requested:

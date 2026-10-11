@@ -99,6 +99,81 @@ class Observations(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 m.native_lookup(args)
 
+    def test_unresolved_explicit_profile_never_queries_or_claims_exclusion(self):
+        cfg = {"docsets": {"tiny": {"dbPath": str(self.db), "kind": "package"}}}
+        for corpus in [None, "Manual"]:
+            args = self.args(profile="does-not-exist")
+            args.corpus = corpus
+            with self.subTest(corpus=corpus), patch.object(m, "load_config", return_value=cfg) as load, patch.object(m, "search_db") as search, patch.object(m, "symbol_db") as symbol:
+                with self.assertRaisesRegex(ValueError, "^unresolved_profile$"):
+                    m.native_lookup(args)
+                self.assertEqual(load.call_count, 1)
+                search.assert_not_called()
+                symbol.assert_not_called()
+        with patch.object(m, "load_config", return_value=cfg), patch.object(m, "NATIVE_OBSERVATIONS", False):
+            args.corpus = None
+            self.assertEqual(m.search_docsets(args)[0]["pageId"], "Package/Test")
+            args.corpus = "Manual"
+            self.assertEqual(m.search_docsets(args), [])
+
+    def test_unresolved_configured_profile_precedes_core_or_legacy_fallback(self):
+        configs = [
+            {"docsets": {"tiny": {"dbPath": str(self.db), "kind": "package"}}, "activeProfile": "missing"},
+            {"databases": {"1.0": {"dbPath": str(self.db)}}, "activeVersion": "1.0", "activeProfile": "missing"},
+            {"dbPath": str(self.db), "activeProfile": "missing"},
+            {"docsets": {"tiny": {"dbPath": str(self.db)}}, "profiles": {"default": None}},
+        ]
+        for cfg in configs:
+            with self.subTest(config=cfg), patch.object(m, "load_config", return_value=cfg):
+                with self.assertRaisesRegex(ValueError, "^unresolved_profile$"):
+                    m.native_lookup(self.args())
+                with patch.object(m, "NATIVE_OBSERVATIONS", False):
+                    self.assertEqual(len(m.resolve_query_docsets(self.args())), 1)
+        with patch.object(m, "load_config", return_value={"dbPath": str(self.db)}):
+            with self.assertRaisesRegex(ValueError, "^unresolved_profile$"):
+                m.native_lookup(self.args(profile="missing"))
+
+    def test_valid_profiles_and_unconfigured_default_keep_legacy_selection(self):
+        docsets = {"tiny": {"dbPath": str(self.db), "kind": "package"}, "other": {"dbPath": str(self.db), "kind": "package"}}
+        cases = [
+            ({"docsets": docsets}, None, ["tiny", "other"]),
+            ({"docsets": docsets, "profiles": {"unselected": ["other"]}}, None, ["tiny", "other"]),
+            ({"docsets": docsets, "profiles": {"default": ["tiny"]}}, None, ["tiny"]),
+            ({"docsets": docsets, "profiles": {"chosen": ["tiny"]}, "activeProfile": "chosen"}, None, ["tiny"]),
+            ({"docsets": docsets, "profiles": {"chosen": ["tiny"], "default": ["other"]}, "activeProfile": "missing"}, "chosen", ["tiny"]),
+            ({"docsets": docsets, "profiles": {"default": []}}, None, ["tiny", "other"]),
+            ({"dbPath": str(self.db)}, None, ["tiny"]),
+        ]
+        for cfg, profile, expected in cases:
+            args = self.args(profile=profile)
+            with self.subTest(config=cfg, profile=profile), patch.object(m, "load_config", return_value=cfg):
+                for native in [True, False]:
+                    with patch.object(m, "NATIVE_OBSERVATIONS", native):
+                        self.assertEqual([id for id, _db, _docset in m.resolve_query_docsets(args)], expected)
+                with patch.object(m, "search_db", wraps=m.search_db) as search:
+                    result = m.native_lookup(args)
+                    self.assertTrue(result["ok"])
+                    self.assertEqual(search.call_count, len(expected))
+                    self.assertTrue(all(x["status"] == "queried" for x in result["coverage"]))
+
+    def test_docset_and_direct_db_selectors_ignore_irrelevant_profiles(self):
+        cfg = {"docsets": {"tiny": {"dbPath": str(self.db), "kind": "package"}}, "databases": {"1.0": {"dbPath": str(self.db)}}, "activeProfile": "missing"}
+        selectors = [
+            {"docset": "tiny"}, {"docsets": "tiny"},
+            {"db": str(self.db)}, {"db_dir": str(self.db)}, {"version": "1.0"},
+            {"db": str(self.db), "docset": "unselected-missing"},
+        ]
+        for selector in selectors:
+            args = self.args(profile="also-missing", **selector)
+            with self.subTest(selector=selector), patch.object(m, "load_config", return_value=cfg):
+                native_selection = m.resolve_query_docsets(args)
+                with patch.object(m, "NATIVE_OBSERVATIONS", False):
+                    legacy_selection = m.resolve_query_docsets(args)
+                    self.assertEqual([(id, db) for id, db, _docset in legacy_selection], [(id, db) for id, db, _docset in native_selection])
+                result = m.native_lookup(args)
+                self.assertTrue(result["ok"])
+                self.assertEqual(result["coverage"][0]["status"], "queried")
+
     def test_show_fallback_and_ambiguity(self):
         result = m.show_db(self.db, "Package/Test", ["notfound"], 500, {"docsetId": "tiny"})
         self.assertEqual(result["headingSelection"], "fallback_all")
