@@ -61,7 +61,7 @@ c.commit();c.close()
     };
     let hookMode = 'none';
     let nestedOutcome;
-    const resourceLoader = new DefaultResourceLoader({
+    const loaderOptions = {
       cwd: tmp, agentDir: tmp, settingsManager, additionalExtensionPaths: [path.join(root, 'index.ts')], noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
       extensionFactories: [
         createCodemodeExtension({ mode: 'on' }),
@@ -79,7 +79,8 @@ c.commit();c.close()
           });
         },
       ],
-    });
+    };
+    const resourceLoader = new DefaultResourceLoader(loaderOptions);
     await resourceLoader.reload();
     assert.deepEqual(resourceLoader.getExtensions().errors, []);
     ({ session } = await createAgentSession({ cwd: tmp, agentDir: tmp, modelRuntime, model, settingsManager, resourceLoader, sessionManager: SessionManager.inMemory(tmp) }));
@@ -133,6 +134,37 @@ c.commit();c.close()
     const persisted = session.sessionManager.getBranch().filter(e => e.type === 'message' && e.message.role === 'toolResult');
     assert(persisted.length > 0);
     assert(persisted.every(e => e.message.structuredContent === undefined));
+    // The second host uses the same canonical package factory with an injected process seam.
+    // Builds never launch Python or fetch sources: process/stage facts are deterministic.
+    session.dispose();
+    const fakeEntry = path.join(tmp, 'build-fixture.ts');
+    const packageEntry = path.join(root, 'index.ts').replaceAll(String.fromCharCode(92), '/');
+    await fs.writeFile(fakeEntry, `import { createUnityDocsExtension } from ${JSON.stringify(packageEntry)};
+export default createUnityDocsExtension(async (_command, args, options) => {
+  const failed = args.includes('--force');
+  for (const stage of (failed ? ['publication'] : ['source','ingestion','database','publication','configuration'])) options.onStderr(Buffer.from('OBSERVATION '+JSON.stringify({stage,state:'completed'})+String.fromCharCode(10)));
+  if (failed) return {exitCode:null,timedOut:true};
+  const docset = args.includes('build-docset');
+  options.onStdout(Buffer.from(JSON.stringify({dbPath:'fixture/unity_docs.sqlite', ...(docset ? {docsetId:'tiny',packageVersion:'1.0'} : {version:'1.0'}), pages:0, sections:0, symbols:0, elapsedSeconds:0, requestedLimit:1, limitPolicy:docset?'source_dependent':'page_limit', sourceMode:docset?'explicit':'local_unity'})));
+  return {exitCode:0};
+});`);
+    hookMode = 'none';
+    const buildsLoader = new DefaultResourceLoader({ ...loaderOptions, additionalExtensionPaths: [fakeEntry] });
+    await buildsLoader.reload();
+    assert.deepEqual(buildsLoader.getExtensions().errors, []);
+    ({ session } = await createAgentSession({ cwd: tmp, agentDir: tmp, modelRuntime, model, settingsManager, resourceLoader: buildsLoader, sessionManager: SessionManager.inMemory(tmp) }));
+    await session.bindExtensions({});
+    session.setActiveToolsByName(['unity_docs_build_database','unity_docs_build_docset','codemode']);
+    session.subscribe(event => { if (event.type === 'tool_execution_end') { JSON.stringify(event); events.push(event); } });
+    for (const name of ['unity_docs_build_database', 'unity_docs_build_docset']) {
+      const receipt = await run(name, { sourcePath: 'fixture/source', dbDir: 'fixture/out', limit: 1 });
+      assert.equal(receipt.result.structuredContent.ok, true);
+      assert.equal(receipt.result.structuredContent.effects.stages.length, 5);
+      assert.match(receipt.result.content[0].text, /build complete/);
+    }
+    const buildFailure = await run('codemode', {code: "const r=await tools.unity_docs_build_database({sourcePath:'fixture/source',dbDir:'fixture/out',force:true}); text({ok:r.ok,effects:r.effects});"});
+    assert.equal(buildFailure.isError, false);
+    assert.match(buildFailure.result.content.map(c=>c.text??'').join(' '), /possibleChanges/);
     console.log(`Validated Pi ${runtimeVersion}: ${events.length} final execution events serialized; no RPC/CLI wire claim.`);
   } finally {
     session?.dispose();
