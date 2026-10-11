@@ -2139,6 +2139,8 @@ def cmd_build(args: argparse.Namespace) -> None:
         if isinstance(configured_db, dict) and configured_db.get("dbPath"):
             db_path = Path(configured_db["dbPath"]).expanduser()
     result = build_database(source, db_path, version, force=args.force, limit=args.limit, write_config=not args.no_config, progress=args.progress)
+    if NATIVE_OBSERVATIONS:
+        result.update({"requestedLimit": args.limit, "limitPolicy": "page_limit", "sourceMode": "local_unity"})
     print_json_or_text(result, args.json)
 
 
@@ -2363,6 +2365,8 @@ def cmd_build_docset(args: argparse.Namespace) -> None:
                     docset_config["sourceUrl"] = source_label
                 save_config(config)
                 observe_stage("source_configuration", "completed")
+        if NATIVE_OBSERVATIONS:
+            result.update({"requestedLimit": args.limit, "limitPolicy": "source_dependent", "sourceMode": source_kind})
         print_json_or_text(result, args.json)
     finally:
         if temp_dir_obj is not None:

@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
 import { fileURLToPath } from "node:url";
@@ -7,17 +7,12 @@ import os from "node:os";
 import fs from "node:fs";
 import { selectPythonCommand } from "./scripts/python-selector.mjs";
 import { runSupervisedProcess } from "./scripts/supervised-process.mjs";
+import { createScriptRunner } from "./scripts/script-runner.ts";
+import { outputSchema, project, failure, NativeFailure, boundedText, DTO_BYTES } from "./scripts/native-output.ts";
 
 const packageRoot = path.dirname(fileURLToPath(import.meta.url));
 const scriptPath = path.join(packageRoot, "scripts", "unity_docs_db.py");
 const pythonCommand = selectPythonCommand();
-
-type ScriptResult = {
-  stdout: string;
-  stderr: string;
-  exitCode: number | null;
-  json?: unknown;
-};
 
 type TextToolResult = {
   content?: Array<{ type: string; text?: string }>;
@@ -156,90 +151,6 @@ function renderReadStyleResult(
   return text;
 }
 
-function formatProgressLine(line: string): string | null {
-  if (!line.startsWith("PROGRESS ")) return null;
-  try {
-    const payload = JSON.parse(line.slice("PROGRESS ".length)) as {
-      stage?: string;
-      corpus?: string | null;
-      pages?: number;
-      totalPages?: number;
-      percent?: number;
-      sections?: number;
-      symbols?: number;
-      elapsed?: string;
-    };
-    const total = payload.totalPages ?? 0;
-    const pages = payload.pages ?? 0;
-    const percent = typeof payload.percent === "number" ? `${payload.percent.toFixed(1)}%` : "?%";
-    const progress = total > 0 ? `${pages}/${total} pages (${percent})` : `${pages} pages`;
-    const corpus = payload.corpus ? ` ${payload.corpus}` : "";
-    return `Unity docs build:${corpus} ${payload.stage ?? "running"} — ${progress}, ${payload.sections ?? 0} sections, ${payload.symbols ?? 0} symbols, elapsed ${payload.elapsed ?? "?"}`;
-  } catch {
-    return line.slice("PROGRESS ".length).trim() || null;
-  }
-}
-
-async function runScript(args: string[], timeoutMs = 120_000, onProgress?: (message: string) => void): Promise<ScriptResult> {
-  let stdout = "";
-  let stderr = "";
-  let stderrLineBuffer = "";
-  let lastProgressAt = Date.now();
-  const heartbeat = onProgress
-    ? setInterval(() => {
-        if (Date.now() - lastProgressAt >= 15_000) {
-          lastProgressAt = Date.now();
-          onProgress("Unity docs build still running...");
-        }
-      }, 15_000)
-    : undefined;
-
-  try {
-    const result = await runSupervisedProcess(pythonCommand, [scriptPath, ...args], {
-      timeoutMs,
-      spawnOptions: {
-        windowsHide: true,
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-      onStdout: (chunk) => { stdout += chunk.toString(); },
-      onStderr: (chunk) => {
-        const text = chunk.toString();
-        stderr += text;
-        stderrLineBuffer += text;
-        const lines = stderrLineBuffer.split(/\r?\n/);
-        stderrLineBuffer = lines.pop() ?? "";
-        for (const line of lines) {
-          const message = formatProgressLine(line.trim());
-          if (message && onProgress) {
-            lastProgressAt = Date.now();
-            onProgress(message);
-          }
-        }
-      },
-    });
-
-    if (result.error) throw result.error;
-    if (result.timedOut) throw new Error(`Unity docs script timed out after ${Math.round(timeoutMs / 1000)}s.`);
-
-    const finalProgress = formatProgressLine(stderrLineBuffer.trim());
-    if (finalProgress && onProgress) onProgress(finalProgress);
-    if (result.exitCode !== 0) {
-      throw new Error([`Unity docs script failed with exit code ${result.exitCode}.`, stderr.trim(), stdout.trim()].filter(Boolean).join("\n"));
-    }
-    let parsed: unknown | undefined;
-    if (stdout.trim()) {
-      try {
-        parsed = JSON.parse(stdout);
-      } catch {
-        // Text mode output is still useful for diagnostics.
-      }
-    }
-    return { stdout, stderr, exitCode: result.exitCode, json: parsed };
-  } finally {
-    if (heartbeat) clearInterval(heartbeat);
-  }
-}
-
 function asArray(value: unknown): Record<string, unknown>[] {
   return Array.isArray(value) ? value.filter((item): item is Record<string, unknown> => typeof item === "object" && item !== null) : [];
 }
@@ -247,29 +158,6 @@ function asArray(value: unknown): Record<string, unknown>[] {
 function truncate(value: string, max = 500): string {
   if (value.length <= max) return value;
   return `${value.slice(0, max)}…`;
-}
-
-function formatConfiguredDocsetHint(info: unknown): string {
-  const docsets = (info as { docsets?: Record<string, { title?: string; enabled?: boolean; dbExists?: boolean }> } | undefined)?.docsets ?? {};
-  const configured = Object.entries(docsets)
-    .filter(([, docset]) => docset.enabled !== false)
-    .map(([id, docset]) => `${id}${docset.title ? ` (${docset.title})` : ""}${docset.dbExists === false ? " [missing db]" : ""}`)
-    .slice(0, 12);
-  if (configured.length === 0) return "";
-  return [
-    "",
-    "Configured docsets you can target explicitly:",
-    ...configured.map((entry) => `- ${entry}`),
-    "Tip: for package/plugin questions, retry with docset/docsets set to the relevant id (for example shapes, input-system, odin, dotween).",
-  ].join("\n");
-}
-
-async function buildNoResultDocsetHint(params: { db?: string; dbDir?: string; version?: string; projectPath?: string; profile?: string; docset?: string }): Promise<string> {
-  try {
-    return formatConfiguredDocsetHint((await runScript(["--json", "info", ...buildInfoArgs(params)], 30_000)).json);
-  } catch {
-    return "";
-  }
 }
 
 function formatSearchResults(results: Record<string, unknown>[], noResultHint = ""): string {
@@ -398,7 +286,33 @@ function buildInfoArgs(params: { db?: string; dbDir?: string; version?: string; 
   return args;
 }
 
-export default function (pi: ExtensionAPI) {
+export function createUnityDocsExtension(processRunner = runSupervisedProcess) {
+  return function (pi: ExtensionAPI) {
+  const runScript = createScriptRunner(pythonCommand, scriptPath, processRunner);
+  function registerNativeTool(definition: ToolDefinition<any, any>) {
+    const operation = definition.name.replace("unity_docs_", "");
+    const execute = definition.execute;
+    pi.registerTool({ ...definition, outputSchema: outputSchema(operation), async execute(...args: Parameters<typeof execute>) {
+      let result: any;
+      try {
+        result = await execute(...args);
+        const dto = project(operation, result.nativeFacts, args[1], result.nativeStages);
+        const details = Buffer.byteLength(JSON.stringify(result.details ?? null)) <= DTO_BYTES ? result.details : undefined;
+        let disclosure = dto.ok && (dto.omissions.rows || dto.omissions.fields) ? `\n[native projection omitted ${dto.omissions.rows} rows; clipped ${dto.omissions.fields} fields]` : "";
+        if (dto.ok && (operation === "search" || operation === "symbol")) {
+          disclosure += `\nCoverage: ${dto.completeness}; ${dto.coverage.map((source: any) => `${source.docsetId}: ${source.status}`).join("; ")}. Query limits apply; no corpus-total claim.`;
+          if (dto.completeness === "excluded") result.content = [{ type: "text", text: "All selected sources intentionally excluded by corpus routing; no applicable source was searched." }];
+        }
+        if (dto.ok && operation === "show") disclosure += `\nHeading selection: ${dto.headingSelection}; selected ${dto.selectedSections} sections; returned ${dto.sections.length}.`;
+        const content = result.content.map((item: any) => item.type === "text" ? { ...item, text: boundedText(item.text + disclosure) } : item);
+        return { content: dto.ok ? content : [{ type: "text", text: boundedText(dto.error.message + (dto.coverage ? `\nSources: ${dto.coverage.map((x: any) => `${x.docsetId}: ${x.status}`).join("; ")}` : "")) }], details, structuredContent: dto, ...(!dto.ok ? { isError: true } : {}) };
+      } catch (error) {
+        const observedError = result && operation.startsWith("build_") ? new NativeFailure(error instanceof NativeFailure ? error.code : "projection_failed", result.nativeStages, true) : error;
+        const dto = failure(operation, observedError);
+        return { content: [{ type: "text", text: boundedText(dto.error.message + (dto.effects ? `\nEffects: ${dto.effects.dispatched ? "dispatched; possible changes" : "not dispatched"}; observed stages: ${dto.effects.stages.map((x: any) => `${x.stage} ${x.state}`).join("; ") || "unknown"}. Do not replay automatically.` : "")) }], details: undefined, structuredContent: dto, isError: true };
+      }
+    } });
+  }
   pi.registerCommand("unity-docs-configure", {
     description: "Configure and optionally build the local Unity documentation database.",
     handler: async (_args, ctx) => {
@@ -468,7 +382,7 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
+  registerNativeTool({
     name: "unity_docs_info",
     label: "Unity Docs Info",
     description: "Show local Unity documentation database configuration and status.",
@@ -492,15 +406,16 @@ export default function (pi: ExtensionAPI) {
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const args = ["--json", "info", ...buildInfoArgs(params, ctx?.cwd)];
       if (params.discover) args.push("--discover");
-      const result = await runScript(args, 60_000);
+      const result = await runScript(args, 60_000, undefined, _signal, true);
       return {
+        nativeFacts: result.json, nativeStages: result.stages,
         content: [{ type: "text", text: JSON.stringify(result.json, null, 2) }],
         details: result.json as object,
       };
     },
   });
 
-  pi.registerTool({
+  registerNativeTool({
     name: "unity_docs_search",
     label: "Unity Docs Search",
     description: "Search the local Unity Manual and ScriptReference SQLite FTS cache and return compact section snippets.",
@@ -530,17 +445,18 @@ export default function (pi: ExtensionAPI) {
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const args = ["--json", "search", params.query, "--limit", String(params.limit ?? 8), ...buildCommonDbArgs(params, ctx?.cwd)];
       if (params.corpus) args.push("--corpus", params.corpus);
-      const result = await runScript(args, 120_000);
-      const rows = asArray(result.json);
-      const hint = rows.length === 0 ? await buildNoResultDocsetHint(params) : "";
+      const result = await runScript(args, 120_000, undefined, _signal, true);
+      const rows = asArray((result.json as any).rows);
+      const hint = ""; // Native coverage comes from the lookup itself; no extra info probe.
       return {
+        nativeFacts: result.json, nativeStages: result.stages,
         content: [{ type: "text", text: formatSearchResults(rows, hint) }],
         details: { results: rows, noResultHint: hint || undefined },
       };
     },
   });
 
-  pi.registerTool({
+  registerNativeTool({
     name: "unity_docs_symbol",
     label: "Unity Docs Symbol",
     description: "Look up Unity Scripting API pages by exact or near-exact symbol name.",
@@ -564,17 +480,18 @@ export default function (pi: ExtensionAPI) {
       return renderReadStyleResult("symbol", result, options, theme, context);
     },
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const result = await runScript(["--json", "symbol", params.name, "--limit", String(params.limit ?? 8), ...buildCommonDbArgs(params, ctx?.cwd)], 120_000);
-      const rows = asArray(result.json);
-      const hint = rows.length === 0 ? await buildNoResultDocsetHint(params) : "";
+      const result = await runScript(["--json", "symbol", params.name, "--limit", String(params.limit ?? 8), ...buildCommonDbArgs(params, ctx?.cwd)], 120_000, undefined, _signal, true);
+      const rows = asArray((result.json as any).rows);
+      const hint = ""; // Native coverage comes from the lookup itself; no extra info probe.
       return {
+        nativeFacts: result.json, nativeStages: result.stages,
         content: [{ type: "text", text: formatSymbolResults(rows, hint) }],
         details: { results: rows, noResultHint: hint || undefined },
       };
     },
   });
 
-  pi.registerTool({
+  registerNativeTool({
     name: "unity_docs_show",
     label: "Unity Docs Show",
     description: "Retrieve compact sections from a local Unity documentation page.",
@@ -601,15 +518,16 @@ export default function (pi: ExtensionAPI) {
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const args = ["--json", "show", params.page, "--max-chars", String(params.maxChars ?? 6000), ...buildCommonDbArgs(params, ctx?.cwd)];
       if (params.sections?.length) args.push("--sections", params.sections.join(","));
-      const result = await runScript(args, 120_000);
+      const result = await runScript(args, 120_000, undefined, _signal, true);
       return {
+        nativeFacts: result.json, nativeStages: result.stages,
         content: [{ type: "text", text: formatShowResult(result.json) }],
         details: result.json as object,
       };
     },
   });
 
-  pi.registerTool({
+  registerNativeTool({
     name: "unity_docs_validate",
     label: "Unity Docs Validate",
     description: "Run representative validation queries against configured Unity documentation docsets.",
@@ -636,15 +554,16 @@ export default function (pi: ExtensionAPI) {
     },
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const args = ["--json", "validate", "--limit", String(params.limit ?? 5), ...buildCommonDbArgs(params, ctx?.cwd)];
-      const result = await runScript(args, 300_000);
+      const result = await runScript(args, 300_000, undefined, _signal, true);
       return {
+        nativeFacts: result.json, nativeStages: result.stages,
         content: [{ type: "text", text: `Unity docs validation complete.\n${JSON.stringify(result.json, null, 2)}` }],
         details: result.json as object,
       };
     },
   });
 
-  pi.registerTool({
+  registerNativeTool({
     name: "unity_docs_build_docset",
     label: "Unity Docs Build Docset",
     description: "Build or rebuild a local SQLite documentation cache from package Documentation~, an llms.txt manifest, public HTTPS or local HTML, or C# XML docs.",
@@ -683,8 +602,8 @@ export default function (pi: ExtensionAPI) {
       if (params.packageName) args.push("--package-name", params.packageName);
       if (params.packageVersion) args.push("--package-version", params.packageVersion);
       if (params.title) args.push("--title", params.title);
-      if (params.llmsUrl && params.gitbookLlmsUrl) throw new Error("Pass only one of llmsUrl or gitbookLlmsUrl.");
-      if (params.llmsSection && params.gitbookSection) throw new Error("Pass only one of llmsSection or gitbookSection.");
+      if (params.llmsUrl && params.gitbookLlmsUrl) throw new NativeFailure("invalid_arguments");
+      if (params.llmsSection && params.gitbookSection) throw new NativeFailure("invalid_arguments");
       const llmsUrl = params.llmsUrl ?? params.gitbookLlmsUrl;
       const llmsSection = params.llmsSection ?? params.gitbookSection;
       if (llmsUrl) args.push("--llms-url", llmsUrl);
@@ -698,15 +617,16 @@ export default function (pi: ExtensionAPI) {
       onUpdate?.({ content: [{ type: "text", text: "Building Unity package documentation docset..." }], details: { phase: "building" } });
       const result = await runScript(args, 3_600_000, (message) => {
         onUpdate?.({ content: [{ type: "text", text: message }], details: { phase: "building" } });
-      });
+      }, _signal, true);
       return {
+        nativeFacts: result.json, nativeStages: result.stages,
         content: [{ type: "text", text: `Unity package documentation docset build complete.\n${JSON.stringify(result.json, null, 2)}` }],
         details: result.json as object,
       };
     },
   });
 
-  pi.registerTool({
+  registerNativeTool({
     name: "unity_docs_build_database",
     label: "Unity Docs Build Database",
     description: "Build or rebuild the local SQLite Unity documentation cache. Use only when explicitly requested by the user.",
@@ -733,11 +653,15 @@ export default function (pi: ExtensionAPI) {
       onUpdate?.({ content: [{ type: "text", text: "Building Unity docs database. This can take several minutes..." }], details: { phase: "building" } });
       const result = await runScript(args, 3_600_000, (message) => {
         onUpdate?.({ content: [{ type: "text", text: message }], details: { phase: "building" } });
-      });
+      }, _signal, true);
       return {
+        nativeFacts: result.json, nativeStages: result.stages,
         content: [{ type: "text", text: `Unity docs database build complete.\n${JSON.stringify(result.json, null, 2)}` }],
         details: result.json as object,
       };
     },
   });
 }
+}
+
+export default createUnityDocsExtension();

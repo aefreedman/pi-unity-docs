@@ -18,6 +18,9 @@ function run(command, args) {
 }
 
 const pythonCommand = selectPythonCommand();
-run(process.execPath, ["--test", "tests/python-selector.test.mjs", "tests/supervised-process.test.mjs"]);
+run(process.execPath, ["--test", "tests/python-selector.test.mjs", "tests/supervised-process.test.mjs", "tests/process-bounds.test.mjs", "tests/current-host.test.mjs"]);
 run(pythonCommand, ["-m", "py_compile", "scripts/unity_docs_db.py"]);
 run(pythonCommand, ["tests/package-docsets.test.py"]);
+
+run(process.execPath, ["--experimental-transform-types", "--test", "tests/native-output.test.mjs"]);
+run(pythonCommand, ["tests/native-observations.test.py"]);

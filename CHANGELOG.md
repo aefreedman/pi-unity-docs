@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Added
+
+- Closed versioned native contracts for all seven documentation tools, with qualified references, bounded projections, source coverage and conservative build receipts.
+
+### Fixed
+
+- Reject malformed JSON/native shapes instead of reporting empty matches; observe native SQL/missing-source failures and intentional corpus exclusions without extra probes.
+- Bound subprocess capture and safe diagnostics, propagate cancellation, and disclose heading-filter fallback and build publication/configuration stages.
+
+### Changed
+
+- Align offline and deterministic SDK validation with Pi 1.1.0; retain legacy Python/text interfaces and useful bounded direct presentation.
+
 ## 0.6.4 - 2026-09-29
 
 ### Changed

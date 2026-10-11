@@ -28,7 +28,10 @@
     "scripts/python-selector.mjs",
     "scripts/supervised-process.mjs",
     "scripts/unity_docs_db.py",
-    "skills/"
+    "skills/",
+    "scripts/native-output.ts",
+    "scripts/script-runner.ts",
+    "docs/2026-10-09-native-contracts.md"
   ],
   "pi": {
     "extensions": [

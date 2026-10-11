@@ -224,3 +224,14 @@ Add `--json` to query commands for machine-readable output. Build progress is em
 - Requires Python 3.10+ and SQLite with FTS5 enabled. No third-party Python packages are required. The pi extension uses `python` on Windows and `python3` on macOS/Linux; set `PI_UNITY_DOCS_PYTHON` to override the interpreter.
 - Build time depends on disk speed. ScriptReference contains tens of thousands of pages.
 - The database can be deleted at any time and rebuilt from the Unity install.
+
+## Native structured results
+
+All seven tools declare a versioned output schema and return validated native facts independently of ordinary text/JSON presentation. See [contracts, bounds and outcome policies](docs/2026-10-09-native-contracts.md). Search coverage distinguishes queried, excluded, missing and failed docsets; partial results do not prove absence. Keep a page's docset/version or the same explicit database selector when calling `unity_docs_show`.
+
+Codemode returns the DTO directly; `ctx.executeTool` returns an outcome wrapper. Check `ok` separately from promise rejection. Failures with data can resolve `ok:false`; blocked/invalid/no-DTO calls can reject. Hooks may remove or alter structured data. Build failures can leave effects; never replay automatically.
+
+```js
+const r = await tools.unity_docs_search({ query: "PlayerInput", docset: "input-system" });
+text(r.ok ? { pages: r.rows.map(x => ({ page: x.pageId, docset: x.docsetId })), coverage: r.coverage } : r.error);
+```

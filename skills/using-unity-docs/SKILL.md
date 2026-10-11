@@ -63,3 +63,5 @@ Use the interactive pi command when available:
 Or use the tool/CLI with an explicit Unity documentation source and database install directory.
 
 For package/plugin documentation, use `unity_docs_build_docset` only when explicitly asked. It can build from an explicit `Documentation~` path, a package root containing `Documentation~`, or a Unity project path plus package name so project `Packages/` and `Library/PackageCache/` sources can be resolved without copying package repositories into `pi-unity-docs`.
+
+For native DTOs, bounded output, partial-source coverage and build uncertainty, see [the public contract reference](../../docs/2026-10-09-native-contracts.md). Retain returned docset/version selectors when following page references; a heading filter can fall back to all sections.

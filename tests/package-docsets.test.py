@@ -83,8 +83,8 @@ Gamepad controls include sticks, buttons, and triggers.
 
 def main():
     index_text = INDEX_TS.read_text(encoding="utf-8")
-    assert "formatConfiguredDocsetHint" in index_text
-    assert "Configured docsets you can target explicitly" in index_text
+    assert "Coverage:" in index_text
+    assert "buildNoResultDocsetHint" not in index_text
     assert "buildInfoArgs" in index_text
 
     with tempfile.TemporaryDirectory() as tmp:

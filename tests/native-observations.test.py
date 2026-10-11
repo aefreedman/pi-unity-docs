@@ -149,6 +149,41 @@ class Observations(unittest.TestCase):
         self.assertNotIn('"stage": "database"', stderr.getvalue())
         self.assertNotIn('"stage": "publication"', stderr.getvalue())
 
+    def test_package_configuration_and_final_source_label_failure(self):
+        source = self.root / "pkg" / "Documentation~"
+        source.mkdir(parents=True)
+        (source / "Test.md").write_text("# Test hello", encoding="utf-8")
+        output = self.root / "package.sqlite"
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), patch.object(m, "update_docset_config", side_effect=OSError("configuration")):
+            with self.assertRaises(OSError):
+                m.build_package_docset(source, output, "test")
+        self.assertTrue(output.exists())
+        self.assertIn('"stage": "publication", "state": "completed"', stderr.getvalue())
+        self.assertIn('"stage": "configuration", "state": "started"', stderr.getvalue())
+        args = m.build_parser().parse_args(["build-docset", "--docset-id", "test", "--html-file", "fixture.html", "--db-dir", str(self.root / "out")])
+        stderr = io.StringIO()
+        def fake_build(*a, **kw):
+            m.observe_stage("publication", "completed")
+            m.observe_stage("configuration", "completed")
+            return {"dbPath": "fixture", "sourcePath": "staged"}
+        with contextlib.redirect_stderr(stderr), patch.object(m, "stage_html_files"), patch.object(m, "build_package_docset", side_effect=fake_build), patch.object(m, "load_config", return_value={"docsets": {"test": {}}}), patch.object(m, "save_config", side_effect=OSError("final config")):
+            with self.assertRaises(OSError):
+                m.cmd_build_docset(args)
+        self.assertIn('"stage": "source_configuration", "state": "started"', stderr.getvalue())
+        self.assertNotIn('"stage": "source_configuration", "state": "completed"', stderr.getvalue())
+
+    def test_native_limit_facts_are_additive(self):
+        args = m.build_parser().parse_args(["--native-observations", "--json", "build", "--source", "fixture", "--db-dir", str(self.root / "out"), "--limit", "1"])
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()), patch.object(m, "build_database", return_value={"pages": 0}):
+            m.cmd_build(args)
+        import json
+        facts = json.loads(output.getvalue())
+        self.assertEqual(facts["requestedLimit"], 1)
+        self.assertEqual(facts["limitPolicy"], "page_limit")
+        self.assertEqual(facts["sourceMode"], "local_unity")
+
     def test_staged_source_failure_does_not_claim_publication(self):
         args = m.build_parser().parse_args(["build-docset", "--html-url", "https://example.invalid", "--db-dir", str(self.root / "output")])
         stderr = io.StringIO()
