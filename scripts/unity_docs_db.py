@@ -1248,10 +1248,53 @@ def create_schema(conn: sqlite3.Connection) -> None:
     )
 
 
+# Internal additive observation channel; legacy callers keep their list/text output.
+NATIVE_OBSERVATIONS = False
+
+
+def observe_stage(stage: str, state: str) -> None:
+    if NATIVE_OBSERVATIONS:
+        print("OBSERVATION " + json.dumps({"stage": stage, "state": state}), file=sys.stderr, flush=True)
+
+
+def native_lookup(args: argparse.Namespace, symbol: bool = False) -> dict[str, Any]:
+    resolved = resolve_query_docsets(args)
+    if len(resolved) > 128:
+        raise ValueError("selection_limit")
+    coverage: list[dict[str, Any]] = []
+    merged: list[dict[str, Any]] = []
+    for docset_id, db_path, docset in resolved:
+        status = "queried"
+        if not db_path.exists():
+            status = "missing"
+        elif not symbol and ((args.corpus in {"Manual", "ScriptReference"} and docset.get("docsetKind") == "package") or (args.corpus == "Package" and docset.get("docsetKind") != "package")):
+            status = "excluded"
+        else:
+            try:
+                rows = symbol_db(db_path, args.name, max(args.limit, 5), docset) if symbol else search_db(db_path, args.query, max(args.limit, 5), args.corpus, docset, strict=True)
+                for row in rows:
+                    row["docsetPriority"] = docset.get("priority", 0)
+                    if symbol:
+                        row["exactMatch"] = str(row.get("fullName") or "").lower() == args.name.lower() or str(row.get("shortName") or "").lower() == args.name.lower()
+                    merged.append(row)
+            except (sqlite3.Error, OSError, SystemExit):
+                status = "failed"
+        coverage.append({"docsetId": docset_id, "status": status})
+    if symbol:
+        merged.sort(key=lambda row: (not row.get("exactMatch"), -int(row.get("docsetPriority") or 0), len(str(row.get("fullName") or ""))))
+    else:
+        merged.sort(key=lambda row: (-int(row.get("exactScore") or 0), -int(row.get("docsetPriority") or 0), float(row.get("rank") or 0)))
+    usable = any(item["status"] == "queried" for item in coverage)
+    excluded = bool(coverage) and all(item["status"] == "excluded" for item in coverage)
+    return {"rows": merged[:args.limit], "coverage": coverage, "ok": usable or (not symbol and excluded), "observedRows": len(merged), "queryLimited": True}
+
+
 def build_database(source: Path, db_path: Path, version: str, force: bool = False, limit: int | None = None, write_config: bool = True, progress: bool = False) -> dict[str, Any]:
+    observe_stage("ingestion", "started")
     validate_source(source)
     if db_path.exists() and not force:
         raise SystemExit(f"Database already exists. Pass --force to replace: {db_path}")
+    observe_stage("database", "started")
     db_path.parent.mkdir(parents=True, exist_ok=True)
     started = time.time()
     tmp_fd, tmp_name = tempfile.mkstemp(prefix="unity_docs_", suffix=".sqlite", dir=str(db_path.parent))
@@ -1372,17 +1415,23 @@ def build_database(source: Path, db_path: Path, version: str, force: bool = Fals
         conn.execute("INSERT OR REPLACE INTO metadata(key, value) VALUES (?, ?)", ("sectionCount", str(counts["sections"])))
         conn.execute("INSERT OR REPLACE INTO metadata(key, value) VALUES (?, ?)", ("symbolCount", str(counts["symbols"])))
         conn.commit()
+        observe_stage("ingestion", "completed")
         emit_progress("finalizing database", force_emit=True)
         conn.execute("VACUUM")
         conn.close()
+        observe_stage("database", "completed")
+        observe_stage("publication", "started")
         shutil.move(str(tmp_path), str(db_path))
+        observe_stage("publication", "completed")
         emit_progress("complete", force_emit=True)
     finally:
         if tmp_path.exists():
             tmp_path.unlink(missing_ok=True)
     elapsed = time.time() - started
     if write_config:
+        observe_stage("configuration", "started")
         update_config(version, source, db_path)
+        observe_stage("configuration", "completed")
     return {"dbPath": str(db_path), "sourcePath": str(source), "version": version, "elapsedSeconds": round(elapsed, 2), **counts}
 
 
@@ -1400,10 +1449,12 @@ def build_package_docset(
     source_kind: str = "explicit",
     project_path: Path | None = None,
 ) -> dict[str, Any]:
+    observe_stage("ingestion", "started")
     source = normalize_package_docs_source(source)
     validate_package_source(source)
     if db_path.exists() and not force:
         raise SystemExit(f"Database already exists. Pass --force to replace: {db_path}")
+    observe_stage("database", "started")
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
     package_root = find_package_root(source)
@@ -1510,10 +1561,14 @@ def build_package_docset(
         conn.execute("INSERT OR REPLACE INTO metadata(key, value) VALUES (?, ?)", ("sectionCount", str(counts["sections"])))
         conn.execute("INSERT OR REPLACE INTO metadata(key, value) VALUES (?, ?)", ("symbolCount", str(counts["symbols"])))
         conn.commit()
+        observe_stage("ingestion", "completed")
         emit_progress("finalizing database", force_emit=True)
         conn.execute("VACUUM")
         conn.close()
+        observe_stage("database", "completed")
+        observe_stage("publication", "started")
         shutil.move(str(tmp_path), str(db_path))
+        observe_stage("publication", "completed")
         emit_progress("complete", force_emit=True)
     finally:
         if tmp_path.exists():
@@ -1521,6 +1576,7 @@ def build_package_docset(
 
     elapsed = time.time() - started
     if write_config:
+        observe_stage("configuration", "started")
         update_docset_config(docset_id, {
             "kind": "package",
             "title": title,
@@ -1533,6 +1589,7 @@ def build_package_docset(
             "priority": 50,
             "enabled": True,
         })
+        observe_stage("configuration", "completed")
     return {"dbPath": str(db_path), "sourcePath": str(source), "docsetId": docset_id, "docsetKind": "package", "title": title, "packageName": package_name, "packageVersion": package_version, "sourceKind": source_kind, "elapsedSeconds": round(elapsed, 2), **counts}
 
 
@@ -1610,11 +1667,12 @@ def annotate_docset(item: dict[str, Any], docset: dict[str, Any]) -> dict[str, A
 
 def docset_from_db_metadata(db_path: Path, fallback_id: str | None = None) -> dict[str, Any]:
     metadata = read_db_metadata(db_path)
-    docset_id = metadata.get("docsetId") or fallback_id
+    docset_id = metadata.get("docsetId") or fallback_id or ("direct" if NATIVE_OBSERVATIONS else None)
     title = metadata.get("docsetTitle") or metadata.get("packageName") or metadata.get("version") or docset_id
     return {
         "docsetId": docset_id,
         "docsetTitle": title,
+        **({"version": metadata.get("version")} if NATIVE_OBSERVATIONS else {}),
         "docsetKind": metadata.get("docsetKind") or ("package" if metadata.get("packageName") else "unity"),
         "packageName": metadata.get("packageName"),
         "packageVersion": metadata.get("packageVersion"),
@@ -1700,9 +1758,13 @@ def resolve_query_docsets(args: argparse.Namespace) -> list[tuple[str, Path, dic
     for docset_id in requested:
         raw = docsets.get(docset_id)
         if not raw or raw.get("enabled", True) is False:
+            if NATIVE_OBSERVATIONS and explicit_requested:
+                raise ValueError("missing_or_disabled_selector")
             continue
         db_path_value = raw.get("dbPath")
         if not db_path_value:
+            if NATIVE_OBSERVATIONS and explicit_requested:
+                raise ValueError("missing_selector_database")
             continue
         db_path = Path(db_path_value).expanduser()
         docset = {
@@ -1723,7 +1785,7 @@ def resolve_query_docsets(args: argparse.Namespace) -> list[tuple[str, Path, dic
     return resolved
 
 
-def search_db(db_path: Path, query: str, limit: int, corpus: str | None = None, docset: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+def search_db(db_path: Path, query: str, limit: int, corpus: str | None = None, docset: dict[str, Any] | None = None, strict: bool = False) -> list[dict[str, Any]]:
     conn = ensure_db(db_path)
     match = fts_query(query)
     corpus_sql = ""
@@ -1758,6 +1820,9 @@ def search_db(db_path: Path, query: str, limit: int, corpus: str | None = None, 
     try:
         rows = [row_dict(row) for row in conn.execute(sql, params)]
     except sqlite3.OperationalError:
+        if strict:
+            conn.close()
+            raise
         rows = []
     conn.close()
     return [annotate_docset(row, docset or {}) for row in rows]
@@ -1904,11 +1969,14 @@ def show_db(db_path: Path, page: str, sections_filter: list[str] | None, max_cha
         conn.close()
         raise SystemExit(f"No Unity documentation page matched: {page}")
     section_rows = [row_dict(row) for row in conn.execute("SELECT * FROM sections WHERE page_id = ? ORDER BY ordinal", (page_row["id"],))]
+    heading_fallback = False
     if sections_filter:
         wanted = [s.lower() for s in sections_filter]
         filtered = [row for row in section_rows if any(w in row["heading_path"].lower() for w in wanted)]
         if filtered:
             section_rows = filtered
+        else:
+            heading_fallback = True
     remaining = max_chars
     output_sections: list[dict[str, Any]] = []
     truncated = False
@@ -1924,6 +1992,9 @@ def show_db(db_path: Path, page: str, sections_filter: list[str] | None, max_cha
         output_sections.append({"headingPath": row["heading_path"], "text": text, "tokenEstimate": row["token_estimate"]})
     page_data = annotate_docset(row_dict(page_row), docset or {})
     result = {"page": page_data, "sections": output_sections, "truncated": truncated}
+    if NATIVE_OBSERVATIONS:
+        result["headingSelection"] = "fallback_all" if heading_fallback else "filtered" if sections_filter else "all"
+        result["selectedSections"] = len(section_rows)
     conn.close()
     return result
 
@@ -2055,7 +2126,9 @@ def cmd_configure(args: argparse.Namespace) -> None:
 
 
 def cmd_build(args: argparse.Namespace) -> None:
+    observe_stage("source", "started")
     source = resolve_source_path(args)
+    observe_stage("source", "completed")
     version = configured_or_project_version(args) or infer_version_from_source(source)
     db_path = resolve_db_path(args) if (args.db or args.db_dir) else db_path_from_dir(default_db_dir(version))
     if not (args.db or args.db_dir):
@@ -2070,12 +2143,12 @@ def cmd_build(args: argparse.Namespace) -> None:
 
 
 def cmd_search(args: argparse.Namespace) -> None:
-    data = search_docsets(args)
+    data = native_lookup(args) if NATIVE_OBSERVATIONS else search_docsets(args)
     print_json_or_text(data, args.json)
 
 
 def cmd_symbol(args: argparse.Namespace) -> None:
-    data = symbol_docsets(args)
+    data = native_lookup(args, symbol=True) if NATIVE_OBSERVATIONS else symbol_docsets(args)
     print_json_or_text(data, args.json)
 
 
@@ -2180,7 +2253,7 @@ def validate_docsets(args: argparse.Namespace) -> dict[str, Any]:
             if kind == "symbol":
                 rows = symbol_db(db_path, query, args.limit, docset)
             else:
-                rows = search_db(db_path, query, args.limit, None, docset)
+                rows = search_db(db_path, query, args.limit, None, docset, strict=NATIVE_OBSERVATIONS)
             haystack = result_text_for_validation(rows)
             ok = bool(rows) and all(expected in haystack for expected in expect)
             if ok:
@@ -2213,6 +2286,7 @@ def cmd_info(args: argparse.Namespace) -> None:
 
 
 def cmd_build_docset(args: argparse.Namespace) -> None:
+    observe_stage("source", "started")
     llms_url = args.llms_url
     llms_section = args.llms_section
     ingesting = bool(llms_url or args.html_url or args.html_file or args.xml_doc)
@@ -2258,6 +2332,7 @@ def cmd_build_docset(args: argparse.Namespace) -> None:
             package_name = args.package_name or metadata.get("name") or package_root.name.split("@")[0]
             package_version = args.package_version
 
+        observe_stage("source", "completed")
         docset_id = sanitize_docset_id(args.docset_id or package_name)
         db_path = resolve_db_path(args) if (args.db or args.db_dir) else db_path_from_dir(default_db_dir(docset_id))
         result = build_package_docset(
@@ -2279,6 +2354,7 @@ def cmd_build_docset(args: argparse.Namespace) -> None:
             if source_label.startswith(("http://", "https://")):
                 result["sourceUrl"] = source_label
         if ingesting and not args.no_config and source_label:
+            observe_stage("source_configuration", "started")
             config = load_config()
             docset_config = (config.get("docsets") or {}).get(docset_id)
             if isinstance(docset_config, dict):
@@ -2286,6 +2362,7 @@ def cmd_build_docset(args: argparse.Namespace) -> None:
                 if source_label.startswith(("http://", "https://")):
                     docset_config["sourceUrl"] = source_label
                 save_config(config)
+                observe_stage("source_configuration", "completed")
         print_json_or_text(result, args.json)
     finally:
         if temp_dir_obj is not None:
@@ -2299,6 +2376,7 @@ def add_json_flag(parser: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Build and query a SQLite cache for Unity offline documentation.")
     parser.add_argument("--json", action="store_true", help="Emit JSON output.")
+    parser.add_argument("--native-observations", action="store_true", help=argparse.SUPPRESS)
     sub = parser.add_subparsers(dest="command", required=True)
 
     configure = sub.add_parser("configure", help="Write Unity docs cache configuration.")
@@ -2416,8 +2494,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    global NATIVE_OBSERVATIONS
     parser = build_parser()
     args = parser.parse_args(argv)
+    NATIVE_OBSERVATIONS = args.native_observations
     try:
         args.func(args)
         return 0

@@ -16,12 +16,19 @@ export function createSupervisedProcessRunner({
     onStdout,
     onStderr,
     spawnOptions = {},
+    signal,
+    maxStdoutBytes = 1_048_576,
+    maxStderrBytes = 1_048_576,
   }) {
     return await new Promise((resolve) => {
       let child;
       let resultSettled = false;
       let terminalSettled = false;
       let timedOut = false;
+      let aborted = false;
+      let captureOverflow = false;
+      let stdoutBytes = 0;
+      let stderrBytes = 0;
       let timeoutTimer;
       let killTimer;
 
@@ -41,12 +48,31 @@ export function createSupervisedProcessRunner({
         if (resultSettled) return;
         resultSettled = true;
         clearTimers();
+        signal?.removeEventListener("abort", handleAbort);
         removeStreamListeners();
         if (terminalSettled) removeTerminalListeners();
-        resolve(result);
+        resolve({ ...result, ...(aborted ? { aborted: true } : {}), ...(captureOverflow ? { captureOverflow: true } : {}) });
       };
-      const handleStdout = (chunk) => onStdout?.(chunk);
-      const handleStderr = (chunk) => onStderr?.(chunk);
+      const stop = () => {
+        if (resultSettled || terminalSettled || killTimer !== undefined) return;
+        try { child.kill("SIGTERM"); } catch {}
+        killTimer = setTimeoutImpl(() => {
+          if (resultSettled || terminalSettled) return;
+          try { child.kill("SIGKILL"); } catch {}
+          finishResult({ exitCode: null, timedOut });
+        }, killGraceMs);
+      };
+      const handleAbort = () => { aborted = true; stop(); };
+      const handleStdout = (chunk) => {
+        stdoutBytes += Buffer.byteLength(chunk);
+        if (stdoutBytes > maxStdoutBytes) { captureOverflow = true; stop(); return; }
+        if (!captureOverflow) onStdout?.(chunk);
+      };
+      const handleStderr = (chunk) => {
+        stderrBytes += Buffer.byteLength(chunk);
+        if (stderrBytes > maxStderrBytes) { captureOverflow = true; stop(); return; }
+        if (!captureOverflow) onStderr?.(chunk);
+      };
       const handleError = (error) => {
         terminalSettled = true;
         if (!resultSettled) finishResult({ exitCode: null, timedOut, error });
@@ -58,6 +84,12 @@ export function createSupervisedProcessRunner({
         removeTerminalListeners();
       };
 
+      if (signal?.aborted) {
+        aborted = true;
+        terminalSettled = true;
+        finishResult({ exitCode: null, timedOut: false, notDispatched: true });
+        return;
+      }
       try {
         child = spawnImpl(command, args, spawnOptions);
       } catch (error) {
@@ -70,25 +102,12 @@ export function createSupervisedProcessRunner({
       child.stderr?.on("data", handleStderr);
       child.on("error", handleError);
       child.on("close", handleClose);
+      signal?.addEventListener("abort", handleAbort, { once: true });
+      if (signal?.aborted) handleAbort();
       timeoutTimer = setTimeoutImpl(() => {
         if (resultSettled || terminalSettled) return;
         timedOut = true;
-        try {
-          child.kill("SIGTERM");
-        } catch {
-          // The terminal event or grace deadline will complete the operation.
-        }
-        killTimer = setTimeoutImpl(() => {
-          if (resultSettled || terminalSettled) return;
-          try {
-            child.kill("SIGKILL");
-          } catch {
-            // The child may have exited between the timeout and escalation.
-          }
-          // Bound the caller, but retain terminal listeners until close/error so
-          // a late child-process error cannot become an unhandled EventEmitter error.
-          finishResult({ exitCode: null, timedOut });
-        }, killGraceMs);
+        stop();
       }, timeoutMs);
     });
   };
