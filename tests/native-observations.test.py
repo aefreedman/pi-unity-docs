@@ -85,8 +85,11 @@ class Observations(unittest.TestCase):
 
     def test_explicit_missing_disabled_and_resolution_failures(self):
         args = self.args(db=None, db_dir=None, version=None, project=None, profile=None, docsets="good,disabled", docset=None)
-        cfg = {"docsets": {"good": {"dbPath": str(self.db)}, "disabled": {"dbPath": str(self.db), "enabled": False}}}
+        cfg = {"docsets": {"good": {"dbPath": str(self.db)}, "disabled": {"dbPath": str(self.db), "enabled": False}}, "profiles": {"default": ["good", "disabled"]}}
         with patch.object(m, "load_config", return_value=cfg):
+            with self.assertRaises(ValueError):
+                m.resolve_query_docsets(args)
+            args.docsets = ""
             with self.assertRaises(ValueError):
                 m.resolve_query_docsets(args)
             args.docsets = "unknown"

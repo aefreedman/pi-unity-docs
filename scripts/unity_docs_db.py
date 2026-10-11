@@ -1758,12 +1758,12 @@ def resolve_query_docsets(args: argparse.Namespace) -> list[tuple[str, Path, dic
     for docset_id in requested:
         raw = docsets.get(docset_id)
         if not raw or raw.get("enabled", True) is False:
-            if NATIVE_OBSERVATIONS and explicit_requested:
+            if NATIVE_OBSERVATIONS:
                 raise ValueError("missing_or_disabled_selector")
             continue
         db_path_value = raw.get("dbPath")
         if not db_path_value:
-            if NATIVE_OBSERVATIONS and explicit_requested:
+            if NATIVE_OBSERVATIONS:
                 raise ValueError("missing_selector_database")
             continue
         db_path = Path(db_path_value).expanduser()
