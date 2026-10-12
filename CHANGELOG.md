@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.7.0 - 2026-10-12
+
 ### Added
 
 - Closed versioned native contracts for all seven documentation tools, with qualified references, bounded projections, source coverage and conservative build receipts.
@@ -9,6 +11,7 @@
 ### Fixed
 
 - Reject malformed JSON/native shapes instead of reporting empty matches; observe native SQL/missing-source failures and intentional corpus exclusions without extra probes.
+- Reject unresolved intended native documentation profiles before fallback while preserving explicit selector precedence and legacy profile behavior.
 - Bound subprocess capture and safe diagnostics, propagate cancellation, and disclose heading-filter fallback and build publication/configuration stages.
 
 ### Changed
