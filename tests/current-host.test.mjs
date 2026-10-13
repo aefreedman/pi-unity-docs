@@ -1,5 +1,6 @@
 // Deterministic in-process SDK fixture: real package file loader and prebuilt temp SQLite.
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -10,11 +11,12 @@ import { VERSION, createAgentSession, DefaultResourceLoader, ModelRuntime, Sessi
 import { createAssistantMessageEventStream } from '@earendil-works/pi-ai';
 import { selectPythonCommand } from '../scripts/python-selector.mjs';
 
-const root = path.resolve('.');
+const declaredPi = JSON.parse(await fs.readFile(new URL('../package.json', import.meta.url), 'utf8')).devDependencies;
+const root = path.dirname(fileURLToPath(new URL('../package.json', import.meta.url)));
 const runtimeVersion = VERSION;
 
 test('current Pi host: direct/native/nested/error/hook/transcript and final-event serialization', async () => {
-  assert.equal(runtimeVersion, '1.1.0');
+  assert.equal(runtimeVersion, declaredPi['@earendil-works/pi-coding-agent']);
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'unity-docs-host-'));
   let session;
   try {

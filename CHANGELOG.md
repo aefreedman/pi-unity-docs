@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.7.1 - 2026-10-13
+
+- Refresh exact Pi development dependencies to stable 1.2.0; derive validation expectations from package.json and retain strict installed-version checks.
+
 ## 0.7.0 - 2026-10-12
 
 ### Added
