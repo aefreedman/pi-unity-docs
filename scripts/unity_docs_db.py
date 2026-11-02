@@ -1912,30 +1912,30 @@ def symbol_db(db_path: Path, name: str, limit: int, docset: dict[str, Any] | Non
             if len(rows) >= limit:
                 return
 
-    # Keep exact/index-friendly lookups first. A single OR with LIKE forced a
-    # large scan on the 100k-row symbol table; staged queries are materially
-    # faster and keep exact API pages ahead of fuzzy matches.
-    append_symbol_rows("sym.full_name = ?", (clean,))
-    if "." in clean:
-        append_symbol_rows("sym.full_name GLOB ?", (f"{clean}(*",))
-        append_symbol_rows("sym.full_name GLOB ?", (f"{clean}",))
-        append_symbol_rows("sym.full_name GLOB ?", (f"*.{clean}(*",))
-        append_symbol_rows("sym.full_name GLOB ?", (f"*.{clean}",))
+    try:
+        # Keep exact/index-friendly lookups first. A single OR with LIKE forced a
+        # large scan on the 100k-row symbol table; staged queries are materially
+        # faster and keep exact API pages ahead of fuzzy matches.
+        append_symbol_rows("sym.full_name = ?", (clean,))
+        if "." in clean:
+            append_symbol_rows("sym.full_name GLOB ?", (f"{clean}(*",))
+            append_symbol_rows("sym.full_name GLOB ?", (f"{clean}",))
+            append_symbol_rows("sym.full_name GLOB ?", (f"*.{clean}(*",))
+            append_symbol_rows("sym.full_name GLOB ?", (f"*.{clean}",))
+            if rows:
+                return [annotate_docset(row, docset or {}) for row in rows[:limit]]
+        append_page_rows(clean)
         if rows:
-            conn.close()
             return [annotate_docset(row, docset or {}) for row in rows[:limit]]
-    append_page_rows(clean)
-    if rows:
-        conn.close()
-        return [annotate_docset(row, docset or {}) for row in rows[:limit]]
-    append_symbol_rows("sym.short_name = ?", (clean,))
-    if short != clean:
-        append_symbol_rows("sym.short_name = ?", (short,))
-    if len(rows) < limit:
-        append_symbol_rows("sym.full_name GLOB ?", (f"*{clean}*",))
+        append_symbol_rows("sym.short_name = ?", (clean,))
+        if short != clean:
+            append_symbol_rows("sym.short_name = ?", (short,))
+        if len(rows) < limit:
+            append_symbol_rows("sym.full_name GLOB ?", (f"*{clean}*",))
 
-    conn.close()
-    return [annotate_docset(row, docset or {}) for row in rows[:limit]]
+        return [annotate_docset(row, docset or {}) for row in rows[:limit]]
+    finally:
+        conn.close()
 
 
 def symbol_docsets(args: argparse.Namespace) -> list[dict[str, Any]]:

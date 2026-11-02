@@ -83,6 +83,21 @@ class Observations(unittest.TestCase):
         self.assertEqual(len(mixed["rows"]), 1)
         self.assertFalse(self.lookup([self.source(db=bad)], symbol=True)["ok"])
 
+    def test_symbol_connections_close_on_success_and_sql_failure(self):
+        bad = self.root / "bad.sqlite"
+        sqlite3.connect(bad).close()
+        for db, name, fails in [(self.db, "Test", False), (self.db, "Missing.Name", False), (bad, "Test", True)]:
+            with self.subTest(db=db.name, name=name):
+                conn = m.ensure_db(db)
+                with patch.object(m, "ensure_db", return_value=conn):
+                    if fails:
+                        with self.assertRaises(sqlite3.OperationalError):
+                            m.symbol_db(db, name, 8)
+                    else:
+                        m.symbol_db(db, name, 8)
+                with self.assertRaises(sqlite3.ProgrammingError):
+                    conn.execute("SELECT 1")
+
     def test_explicit_missing_disabled_and_resolution_failures(self):
         args = self.args(db=None, db_dir=None, version=None, project=None, profile=None, docsets="good,disabled", docset=None)
         cfg = {"docsets": {"good": {"dbPath": str(self.db)}, "disabled": {"dbPath": str(self.db), "enabled": False}}, "profiles": {"default": ["good", "disabled"]}}
