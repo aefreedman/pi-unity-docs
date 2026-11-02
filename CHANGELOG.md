@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Validate against exact Pi 1.5.0 development dependencies, including real-host schema coercion, rejected builds with zero process dispatch, and preserved failure receipts.
+- Keep tool-call rendering safe for invalid argument shapes and include the root changelog in npm packages for Pi update discovery.
+- Close SQLite symbol-query connections on errors as well as successful results, avoiding locked cache files on Windows.
+
 ## 0.7.1 - 2026-10-13
 
 - Refresh exact Pi development dependencies to stable 1.2.0; derive validation expectations from package.json and retain strict installed-version checks.

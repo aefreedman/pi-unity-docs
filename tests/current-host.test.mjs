@@ -62,6 +62,7 @@ c.commit();c.close()
       return stream;
     };
     let hookMode = 'none';
+    const buildInputs = [];
     let nestedOutcome;
     const loaderOptions = {
       cwd: tmp, agentDir: tmp, settingsManager, additionalExtensionPaths: [path.join(root, 'index.ts')], noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
@@ -73,6 +74,9 @@ c.commit();c.close()
             nestedOutcome = await ctx.executeTool('unity_docs_search', { db: _args.missing ? path.join(tmp, 'missing.sqlite') : db, query: 'hello' }, { signal });
             return { content: [{ type: 'text', text: 'nested observed' }], details: undefined };
           } });
+          pi.on('tool_call', event => {
+            if (event.toolName.startsWith('unity_docs_build_')) buildInputs.push(structuredClone(event.input));
+          });
           pi.on('tool_call', event => event.toolName === 'unity_docs_search' && hookMode === 'block' ? { block: true, reason: 'fixture blocked' } : undefined);
           pi.on('tool_result', event => {
             if (event.toolName !== 'unity_docs_search') return;
@@ -139,10 +143,15 @@ c.commit();c.close()
     // The second host uses the same canonical package factory with an injected process seam.
     // Builds never launch Python or fetch sources: process/stage facts are deterministic.
     session.dispose();
+    const dispatchLog = path.join(tmp, 'dispatch.jsonl');
+    await fs.writeFile(dispatchLog, '');
+    const dispatches = async () => (await fs.readFile(dispatchLog, 'utf8')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
     const fakeEntry = path.join(tmp, 'build-fixture.ts');
     const packageEntry = path.join(root, 'index.ts').replaceAll(String.fromCharCode(92), '/');
     await fs.writeFile(fakeEntry, `import { createUnityDocsExtension } from ${JSON.stringify(packageEntry)};
+import { appendFileSync } from 'node:fs';
 export default createUnityDocsExtension(async (_command, args, options) => {
+  appendFileSync(${JSON.stringify(dispatchLog)}, JSON.stringify(args)+String.fromCharCode(10));
   const failed = args.includes('--force');
   for (const stage of (failed ? ['publication'] : ['source','ingestion','database','publication','configuration'])) options.onStderr(Buffer.from('OBSERVATION '+JSON.stringify({stage,state:'completed'})+String.fromCharCode(10)));
   if (failed) return {exitCode:null,timedOut:true};
@@ -154,6 +163,18 @@ export default createUnityDocsExtension(async (_command, args, options) => {
     const buildsLoader = new DefaultResourceLoader({ ...loaderOptions, additionalExtensionPaths: [fakeEntry] });
     await buildsLoader.reload();
     assert.deepEqual(buildsLoader.getExtensions().errors, []);
+    const definitions = buildsLoader.getExtensions().extensions.flatMap(extension => [...extension.tools.values()].map(tool => tool.definition)).filter(tool => tool.name.startsWith('unity_docs_'));
+    assert.equal(definitions.length, 7);
+    for (const definition of definitions) {
+      // All registered parameters and generated outputs are ordinary JSON Schema.
+      assert.equal(JSON.parse(JSON.stringify(definition.parameters)).type, 'object');
+      assert(definition.outputSchema);
+      const theme = { fg: (_color, text) => text, bold: text => text };
+      const args = Object.fromEntries(Object.keys(definition.parameters.properties).map(key => [key, { invalid: true }]));
+      const context = { args, state: {}, isError: true, executionStarted: false };
+      assert.doesNotThrow(() => definition.renderCall(args, theme, context).render(80));
+      assert.doesNotThrow(() => definition.renderResult({ content: [{ type: 'text', text: '- dbDir: missing' }], details: undefined }, { expanded: false, isPartial: false }, theme, context).render(80));
+    }
     ({ session } = await createAgentSession({ cwd: tmp, agentDir: tmp, modelRuntime, model, settingsManager, resourceLoader: buildsLoader, sessionManager: SessionManager.inMemory(tmp) }));
     await session.bindExtensions({});
     session.setActiveToolsByName(['unity_docs_build_database','unity_docs_build_docset','codemode']);
@@ -164,6 +185,44 @@ export default createUnityDocsExtension(async (_command, args, options) => {
       assert.equal(receipt.result.structuredContent.effects.stages.length, 5);
       assert.match(receipt.result.content[0].text, /build complete/);
     }
+    const beforeInvalid = (await dispatches()).length;
+    for (const [name, args] of [
+      ['unity_docs_build_database', { dbDir: 'fixture/out' }],
+      ['unity_docs_build_database', { sourcePath: {}, dbDir: 'fixture/out' }],
+      ['unity_docs_build_database', { sourcePath: 'fixture/source', dbDir: 'fixture/out', limit: 0 }],
+      ['unity_docs_build_database', { sourcePath: 'fixture/source', dbDir: 'fixture/out', limit: 'invalid' }],
+      ['unity_docs_build_database', { sourcePath: 'fixture/source', dbDir: 'fixture/out', force: 'invalid' }],
+      ['unity_docs_build_docset', { sourcePath: 'fixture/source' }],
+      ['unity_docs_build_docset', { dbDir: 'fixture/out', htmlSplitLevel: 7 }],
+    ]) {
+      const invalid = await run(name, args);
+      assert.equal(invalid.isError, true, JSON.stringify(invalid));
+      assert.equal(invalid.result.structuredContent, undefined);
+    }
+    assert.equal((await dispatches()).length, beforeInvalid, 'schema-invalid mutations never dispatch');
+    const semanticFailure = await run('unity_docs_build_docset', { dbDir: 'fixture/out', llmsUrl: 'https://fixture.invalid/a', gitbookLlmsUrl: 'https://fixture.invalid/b' });
+    assert.equal(semanticFailure.isError, true);
+    assert.equal(semanticFailure.result.structuredContent.error.code, 'invalid_arguments');
+    assert.equal((await dispatches()).length, beforeInvalid, 'semantic guards still prevent dispatch');
+    const coerced = await run('unity_docs_build_docset', { sourcePath: 'fixture/source', dbDir: 'fixture/out', limit: '2', force: 'false', htmlFiles: 'fixture/page.html', htmlSplitLevel: '2', title: null });
+    assert.equal(coerced.isError, false, JSON.stringify(coerced));
+    assert.equal(buildInputs.at(-1).limit, 2);
+    assert.equal(buildInputs.at(-1).htmlSplitLevel, 2);
+    assert.equal(buildInputs.at(-1).force, false);
+    assert.deepEqual(buildInputs.at(-1).htmlFiles, ['fixture/page.html']);
+    assert(!Object.hasOwn(buildInputs.at(-1), 'title'));
+    const coercedArgs = (await dispatches()).at(-1);
+    assert.equal(coercedArgs[coercedArgs.indexOf('--limit') + 1], '2');
+    assert.equal(coercedArgs[coercedArgs.indexOf('--html-file') + 1], 'fixture/page.html');
+    assert.equal(coercedArgs[coercedArgs.indexOf('--html-split-level') + 1], '2');
+    assert(!coercedArgs.includes('--force'), 'boolean false string must not enable force');
+    assert(!coercedArgs.includes('--title'), 'optional null must be dropped');
+    const coercedFailure = await run('unity_docs_build_database', { sourcePath: 'fixture/source', dbDir: 'fixture/out', force: 'true' });
+    assert.equal(buildInputs.at(-1).force, true);
+    assert.equal(coercedFailure.isError, true);
+    assert.equal(coercedFailure.result.structuredContent.error.code, 'timeout');
+    assert.equal(coercedFailure.result.structuredContent.effects.dispatched, true);
+    assert.deepEqual(coercedFailure.result.structuredContent.effects.stages, [{ stage: 'publication', state: 'completed' }]);
     const buildFailure = await run('codemode', {code: "const r=await tools.unity_docs_build_database({sourcePath:'fixture/source',dbDir:'fixture/out',force:true}); text({ok:r.ok,effects:r.effects});"});
     assert.equal(buildFailure.isError, false);
     assert.match(buildFailure.result.content.map(c=>c.text??'').join(' '), /possibleChanges/);

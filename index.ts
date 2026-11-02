@@ -46,7 +46,7 @@ function getTextOutput(result: TextToolResult): string {
 
 function renderReadStyleCall(label: string, target: string | undefined, theme: any, context: any): Text {
   const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-  const targetText = target ? theme.fg("accent", shortenDisplay(target)) : theme.fg("toolOutput", "...");
+  const targetText = typeof target === "string" && target ? theme.fg("accent", shortenDisplay(target)) : theme.fg("toolOutput", "...");
   text.setText(`${theme.fg("toolTitle", theme.bold(label))} ${targetText}`);
   return text;
 }
