@@ -386,8 +386,8 @@ export function createUnityDocsExtension(processRunner = runSupervisedProcess) {
     name: "unity_docs_info",
     label: "Unity Docs Info",
     description: "Show local Unity documentation database configuration and status.",
-    promptSnippet: "Show Unity documentation cache configuration and database status.",
-    promptGuidelines: ["Use unity_docs_info when the Unity docs cache status or configured database path is unknown."],
+    promptSnippet: "List configured supplemental or offline Unity documentation docsets.",
+    promptGuidelines: ["Use unity_docs_info when the relevant supplemental or explicitly requested offline docset is unknown."],
     parameters: Type.Object({
       discover: Type.Optional(Type.Boolean({ description: "Include discovered Unity Documentation/en source directories." })),
       db: Type.Optional(Type.String({ description: "Explicit SQLite database path." })),
@@ -418,11 +418,11 @@ export function createUnityDocsExtension(processRunner = runSupervisedProcess) {
   registerNativeTool({
     name: "unity_docs_search",
     label: "Unity Docs Search",
-    description: "Search the local Unity Manual and ScriptReference SQLite FTS cache and return compact section snippets.",
-    promptSnippet: "Search local Unity documentation by terms and return compact section snippets.",
+    description: "Search configured supplemental or offline Unity documentation docsets and return compact section snippets.",
+    promptSnippet: "Search local addon, asset, plugin, or package docsets, or an explicit offline core cache.",
     promptGuidelines: [
-      "Use unity_docs_search for Unity Manual or Scripting API documentation lookups when exact symbol lookup is insufficient.",
-      "For token efficiency, call unity_docs_show only for the most relevant result sections after unity_docs_search.",
+      "Use version-matched official Unity documentation first for core Engine, Editor and officially documented packages.",
+      "Search supplemental documentation with an explicit docset selector; retain it when reading a result with unity_docs_show.",
     ],
     parameters: Type.Object({
       query: Type.String({ description: "Search terms, for example 'Physics.Raycast layerMask trigger'." }),
@@ -459,9 +459,9 @@ export function createUnityDocsExtension(processRunner = runSupervisedProcess) {
   registerNativeTool({
     name: "unity_docs_symbol",
     label: "Unity Docs Symbol",
-    description: "Look up Unity Scripting API pages by exact or near-exact symbol name.",
-    promptSnippet: "Look up Unity Scripting API symbols such as UnityEngine.Physics.Raycast.",
-    promptGuidelines: ["Use unity_docs_symbol before unity_docs_search for API-like Unity queries such as Physics.Raycast or GameObject.AddComponent."],
+    description: "Look up API symbols by exact or near-exact name in local supplemental or offline Unity documentation.",
+    promptSnippet: "Look up an API symbol in a supplemental or offline Unity docset.",
+    promptGuidelines: ["Scope supplemental API lookups to the relevant docset. For core Unity API symbols, use official version-matched docs unless doing an explicit offline lookup."],
     parameters: Type.Object({
       name: Type.String({ description: "API symbol, for example 'UnityEngine.Physics.Raycast' or 'Physics.Raycast'." }),
       limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50, default: 8 })),
@@ -496,7 +496,7 @@ export function createUnityDocsExtension(processRunner = runSupervisedProcess) {
     label: "Unity Docs Show",
     description: "Retrieve compact sections from a local Unity documentation page.",
     promptSnippet: "Show selected sections from a local Unity documentation page.",
-    promptGuidelines: ["Use unity_docs_show after unity_docs_symbol or unity_docs_search, requesting only the sections needed to answer the user."],
+    promptGuidelines: ["Use the same docset selector as the preceding unity_docs_symbol or unity_docs_search lookup and request only relevant sections."],
     parameters: Type.Object({
       page: Type.String({ description: "Page id, slug, title, or url path, for example 'ScriptReference/Physics.Raycast'." }),
       sections: Type.Optional(Type.Array(Type.String(), { description: "Optional heading filters, for example ['Declaration','Parameters','Description']." })),
@@ -568,7 +568,7 @@ export function createUnityDocsExtension(processRunner = runSupervisedProcess) {
     label: "Unity Docs Build Docset",
     description: "Build or rebuild a local SQLite documentation cache from package Documentation~, an llms.txt manifest, public HTTPS or local HTML, or C# XML docs.",
     promptSnippet: "Build or rebuild a Unity package or external documentation docset.",
-    promptGuidelines: ["Use unity_docs_build_docset only when the user explicitly asks to build or rebuild package/plugin documentation."],
+    promptGuidelines: ["Use unity_docs_build_docset only when the user explicitly asks to build or rebuild a supplemental or offline docset."],
     parameters: Type.Object({
       docsetId: Type.Optional(Type.String({ description: "Docset id to register. Defaults to packageName." })),
       sourcePath: Type.Optional(Type.String({ description: "Package Documentation~ source directory, or package root containing Documentation~." })),
@@ -631,7 +631,7 @@ export function createUnityDocsExtension(processRunner = runSupervisedProcess) {
     label: "Unity Docs Build Database",
     description: "Build or rebuild the local SQLite Unity documentation cache. Use only when explicitly requested by the user.",
     promptSnippet: "Build or rebuild the SQLite Unity documentation cache from an installed Unity docs directory.",
-    promptGuidelines: ["Use unity_docs_build_database only when the user explicitly asks to build or rebuild the Unity docs cache."],
+    promptGuidelines: ["Build the core cache only on explicit request for local or offline use; it is not needed for routine Unity documentation questions."],
     parameters: Type.Object({
       sourcePath: Type.String({ description: "Unity Documentation/en source directory." }),
       dbDir: Type.String({ description: "Directory where unity_docs.sqlite should be installed." }),

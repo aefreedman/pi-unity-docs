@@ -1,16 +1,10 @@
 # pi-unity-docs
 
-Pi package for fast, token-efficient retrieval from local Unity offline documentation.
+Pi tools for searching supplemental Unity documentation: addons, third-party packages, plugins, and assets that Unity's official docs don't cover.
 
-The package builds a local SQLite FTS5 database from an installed Unity documentation folder such as:
+For the Engine, Editor, Scripting API, and officially documented packages, start with [Unity's official agent index](https://docs.unity.com/llms.txt) and version-matched official pages. You can also retrieve official Markdown with `unity docs --content`. Check the resolved version before relying on the result. No local core cache is needed for normal lookups.
 
-```text
-C:\Program Files\Unity\Hub\Editor\6000.4.7f1\Editor\Data\Documentation\en
-```
-
-It does not copy raw HTML and does not generate Markdown/JSONL. The Unity install remains the source of truth; the generated database is a rebuildable cache.
-
-The package can also build separate package/plugin documentation docsets from Unity package `Documentation~` folders. Package docsets are managed separately from the core Unity docs cache and can be searched alongside it.
+For supplemental coverage, [build a docset](#direct-cli-usage) from package `Documentation~`, publisher documentation, or C# XML docs. Query it by ID (for example, `unity_docs_search` with `docset: "shapes"`) and use the same ID to read a result. The SQLite FTS5 index is a rebuildable cache. Existing core caches remain available for intentional offline use.
 
 ## Install in pi
 
@@ -28,9 +22,9 @@ pi -e npm:@aefree/pi-unity-docs
 
 For local development, replace the npm spec with the path to this checkout.
 
-## Configure and build
+## Optional offline core cache
 
-Interactive configuration from pi:
+To configure an installed Editor documentation source for offline lookup, use Pi's interactive command:
 
 ```text
 /unity-docs-configure
@@ -122,9 +116,9 @@ python3 scripts/unity_docs_db.py search "Physics.Raycast" --docsets unity-6000.4
 ## Tools exposed to pi
 
 - `unity_docs_info` — show configuration and database status.
-- `unity_docs_search` — full-text search over section-level Unity docs.
-- `unity_docs_symbol` — exact/near-exact API symbol lookup.
-- `unity_docs_show` — retrieve compact page sections.
+- `unity_docs_search` — full-text search over selected docsets.
+- `unity_docs_symbol` — exact/near-exact API symbol lookup in selected docsets.
+- `unity_docs_show` — retrieve compact page sections using the matching docset.
 - `unity_docs_build_database` — build/rebuild the core Unity docs cache when explicitly requested.
 - `unity_docs_build_docset` — build/rebuild a package/plugin docset from `Documentation~`, a generic `llms.txt` manifest, public HTML pages, or C# XML docs when explicitly requested.
 - `unity_docs_validate` — run representative validation queries across configured docsets.
@@ -185,7 +179,7 @@ python3 scripts/unity_docs_db.py build-docset \
 
 Remote ingestion accepts HTTPS only, rejects credential-bearing URLs and non-public network destinations, limits each response to 10 MiB, and keeps links discovered in an `llms.txt` manifest on the manifest's origin. Use `--html-file` for intentional local HTML ingestion.
 
-Build the rolling Unity CLI documentation from Unity's published Markdown manifest:
+If you explicitly need an offline mirror of the rolling Unity CLI documentation, build it from Unity's published Markdown manifest:
 
 ```bash
 python3 scripts/unity_docs_db.py build-docset \
@@ -197,7 +191,7 @@ python3 scripts/unity_docs_db.py build-docset \
   --force
 ```
 
-The manifest currently includes the CLI introduction, use guide, reference, and release notes. Pipeline command contracts should be indexed separately from an installed `com.unity.pipeline` package's `Documentation~` directory so their package version remains explicit:
+Installed CLI help and the exact Editor's live command catalog are authoritative for command syntax. If you need an offline Pipeline reference, index the installed `com.unity.pipeline` package's `Documentation~` separately so its version remains explicit:
 
 ```bash
 python3 scripts/unity_docs_db.py build-docset \

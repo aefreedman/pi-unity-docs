@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- Make supplemental addon, asset, plugin, and package docsets the primary use; keep core Unity caches available for explicit offline lookup.
+
 ## 0.7.2 - 2026-11-02
 
 ### Changed
